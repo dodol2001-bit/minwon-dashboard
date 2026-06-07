@@ -393,10 +393,8 @@ def tokenize_text(text):
         if not is_valid_token(word):
             continue
 
-        # 원래 토큰 + 합성어 부분 토큰을 같이 추가한다.
-        for token in expand_compound_tokens(word):
-            if is_valid_token(token):
-                cleaned.append(token)
+        # 합성어를 세부 부분 토큰으로 쪼개지 않고, 원문에서 추출된 토큰만 사용한다.
+        cleaned.append(word)
 
     return cleaned
 
@@ -542,15 +540,17 @@ def build_category_keyword_weights(df, top_n=250):
 
 def calculate_reward_score(selected_rank):
     """추천 순위에 따른 보상 점수.
-    사용자가 1순위를 선택하면 추천이 맞았다고 보고 큰 보상을 주고,
-    하위 순위를 선택할수록 낮은 보상을 준다.
+    예측 결과에 없던 분야를 사용자가 직접 선택한 경우에는
+    추천 순위가 없는 선택이므로 보상 점수를 부여하지 않는다.
     """
     try:
         rank = int(selected_rank)
     except Exception:
-        return 0.3
+        return 0.0
 
-    if rank <= 1:
+    if rank <= 0:
+        return 0.0
+    if rank == 1:
         return 1.0
     if rank == 2:
         return 0.7
@@ -1059,6 +1059,43 @@ def draw_percent_bar_plotly(df, label_col, value_col, title, top_n=15):
     return fig
 
 
+
+
+# =========================================================
+# 9-1. 민원 목록 표시 함수
+# =========================================================
+
+
+def shorten_text(value, max_len=60):
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
+def build_complaint_list_label(row):
+    source_type = "신규" if str(row.get("faqNo", "")).startswith("USER_") else "기존"
+    date_value = row.get("reg_date", "")
+    try:
+        date_text = pd.to_datetime(date_value).strftime("%Y-%m-%d")
+    except Exception:
+        date_text = "날짜없음"
+
+    category = str(row.get("category", "미분류")) or "미분류"
+    title = str(row.get("title", "")).strip()
+    complaint_text = str(row.get("complaint_text", "")).strip()
+    title_or_text = title if title else complaint_text
+    faq_no = str(row.get("faqNo", ""))
+
+    return f"[{source_type}] {date_text} | {category} | {shorten_text(title_or_text, 55)} | {faq_no}"
+
+
+def safe_display_value(value, default="-"):
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return default
+    return text
+
 # =========================================================
 # 10. 앱 화면
 # =========================================================
@@ -1077,29 +1114,11 @@ model = train_model(df)
 
 
 # =========================================================
-# 11. 사이드바 필터
+# 11. 전역 누적 현황 계산
 # =========================================================
 
-st.sidebar.header("검색 조건")
-
-sido_options = clean_filter_options(df["sido"].dropna().unique().tolist(), include_all=True)
-selected_sido = st.sidebar.selectbox("시도/기관 선택", sido_options)
-
-filtered = df.copy()
-if selected_sido != "전체":
-    filtered = filtered[filtered["sido"] == selected_sido]
-
-sigungu_options = clean_filter_options(filtered["sigungu"].dropna().unique().tolist(), include_all=True)
-selected_sigungu = st.sidebar.selectbox("시군구/세부기관 선택", sigungu_options)
-if selected_sigungu != "전체":
-    filtered = filtered[filtered["sigungu"] == selected_sigungu]
-
-dept_options = clean_filter_options(filtered["dept_name"].dropna().unique().tolist(), include_all=True)
-selected_dept = st.sidebar.selectbox("부서 선택", dept_options)
-if selected_dept != "전체":
-    filtered = filtered[filtered["dept_name"] == selected_dept]
-
-st.sidebar.metric("선택 조건 데이터 수", f"{len(filtered):,}건")
+# 사이드바에는 필터/현황을 두지 않는다.
+# 지역·기관·부서 필터와 누적 현황은 1번 탭에서만 표시한다.
 
 new_count = 0
 if NEW_COMPLAINT_PATH.exists():
@@ -1107,7 +1126,6 @@ if NEW_COMPLAINT_PATH.exists():
         new_count = len(pd.read_csv(NEW_COMPLAINT_PATH))
     except Exception:
         new_count = 0
-st.sidebar.metric("신규 접수 누적 수", f"{new_count:,}건")
 
 feedback_count = 0
 if FEEDBACK_PATH.exists():
@@ -1115,18 +1133,18 @@ if FEEDBACK_PATH.exists():
         feedback_count = len(pd.read_csv(FEEDBACK_PATH))
     except Exception:
         feedback_count = 0
-st.sidebar.metric("피드백 보상 누적", f"{feedback_count:,}건")
 
 
 # =========================================================
 # 12. 탭 구성
 # =========================================================
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "지역·분야별 민원 추이",
     "분야별 빈출 단어",
     "신규 민원 분야 예측",
     "지도 기반 지역 비율",
+    "기존·신규 민원 목록",
 ])
 
 
@@ -1137,11 +1155,38 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.subheader("1. 지역·기관·분야별 민원 추이")
 
-    c1, c2, c3, c4 = st.columns(4)
+    st.markdown("#### 검색 조건")
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+
+    with filter_col1:
+        sido_options = clean_filter_options(df["sido"].dropna().unique().tolist(), include_all=True)
+        selected_sido = st.selectbox("시도/기관 선택", sido_options, key="home_sido_filter")
+
+    filtered = df.copy()
+    if selected_sido != "전체":
+        filtered = filtered[filtered["sido"] == selected_sido]
+
+    with filter_col2:
+        sigungu_options = clean_filter_options(filtered["sigungu"].dropna().unique().tolist(), include_all=True)
+        selected_sigungu = st.selectbox("시군구/세부기관 선택", sigungu_options, key="home_sigungu_filter")
+
+    if selected_sigungu != "전체":
+        filtered = filtered[filtered["sigungu"] == selected_sigungu]
+
+    with filter_col3:
+        dept_options = clean_filter_options(filtered["dept_name"].dropna().unique().tolist(), include_all=True)
+        selected_dept = st.selectbox("부서 선택", dept_options, key="home_dept_filter")
+
+    if selected_dept != "전체":
+        filtered = filtered[filtered["dept_name"] == selected_dept]
+
+    st.markdown("#### 민원 건수 현황")
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("전체 데이터", f"{len(df):,}건")
     c2.metric("필터링 데이터", f"{len(filtered):,}건")
     c3.metric("분야 수", f"{filtered['category'].nunique():,}개")
     c4.metric("신규 접수 누적", f"{new_count:,}건")
+    c5.metric("피드백 보상 누적", f"{feedback_count:,}건")
 
     left, right = st.columns(2)
 
@@ -1264,16 +1309,65 @@ with tab3:
         )
 
         st.subheader("전달 분야 선택")
-        category_labels = [f"{row['category']} | {row['probability_percent']}%" for _, row in result_df.iterrows()]
-        selected_category_label = st.selectbox("전달할 민원 분야를 선택하세요", category_labels)
-        selected_category = selected_category_label.split(" | ")[0]
-        selected_probability = result_df[result_df["category"] == selected_category]["probability_percent"].iloc[0]
-        selected_rank = int(result_df.reset_index(drop=True).index[result_df.reset_index(drop=True)["category"] == selected_category][0]) + 1
-        reward_score = calculate_reward_score(selected_rank)
+
+        # 예측 결과에 나온 분야뿐 아니라 전체 분야를 모두 선택할 수 있게 구성한다.
+        # 단, 예측 결과에 없던 분야를 사용자가 직접 선택하면 추천 순위가 없으므로 보상 점수는 0점으로 저장한다.
+        result_lookup = {
+            str(row["category"]): {
+                "probability_percent": float(row["probability_percent"]),
+                "rank": int(idx) + 1,
+            }
+            for idx, row in result_df.reset_index(drop=True).iterrows()
+        }
+
+        all_categories = sorted([
+            str(category)
+            for category in df["category"].dropna().unique().tolist()
+            if str(category).strip()
+        ])
+
+        # 예측 결과에 나온 분야를 먼저 보여주고, 나머지 분야는 뒤에 붙인다.
+        predicted_categories = [str(category) for category in result_df["category"].tolist()]
+        remaining_categories = [category for category in all_categories if category not in predicted_categories]
+        selectable_categories = predicted_categories + remaining_categories
+
+        category_labels = []
+        category_label_map = {}
+
+        for category in selectable_categories:
+            if category in result_lookup:
+                prob = result_lookup[category]["probability_percent"]
+                rank = result_lookup[category]["rank"]
+                label = f"{rank}순위: {category} | {prob}%"
+            else:
+                label = f"순위 없음: {category} | 예측 확률 없음"
+
+            category_labels.append(label)
+            category_label_map[label] = category
+
+        selected_category_label = st.selectbox(
+            "전달할 민원 분야를 선택하세요",
+            category_labels
+        )
+
+        selected_category = category_label_map[selected_category_label]
+
+        if selected_category in result_lookup:
+            selected_probability = result_lookup[selected_category]["probability_percent"]
+            selected_rank = result_lookup[selected_category]["rank"]
+            reward_score = calculate_reward_score(selected_rank)
+            reward_message = f"피드백 보상 점수: {reward_score}점 / 선택 순위: {selected_rank}순위"
+            probability_message = f"{selected_probability}%"
+        else:
+            selected_probability = 0.0
+            selected_rank = 0
+            reward_score = 0.0
+            reward_message = "피드백 보상 점수: 없음 / 예측 순위 외 직접 선택"
+            probability_message = "예측 확률 없음"
 
         st.info(
-            f"선택한 전달 분야: {selected_category} ({selected_probability}%)\n\n"
-            f"피드백 보상 점수: {reward_score}점 / 선택 순위: {selected_rank}순위"
+            f"선택한 전달 분야: {selected_category} ({probability_message})\n\n"
+            f"{reward_message}"
         )
 
         st.subheader("실제 데이터 기반 추천 전달 부서")
@@ -1335,11 +1429,12 @@ with tab3:
                 get_common_words_by_category.clear()
                 build_category_keyword_weights.clear()
                 build_feedback_keyword_weights.clear()
+                feedback_reward_label = "없음" if float(feedback.get("reward_score", 0.0)) <= 0 else f"{feedback['reward_score']}점"
                 st.session_state["last_forward_message"] = (
                     f"{selected_info['display_dept']}로 민원이 전달되었습니다! "
                     f"현재 신규 접수 누적 수가 1건 증가했습니다. "
                     f"저장 분야: {saved['category']} / 지역: {saved['user_sido']} {saved['user_sigungu']} {saved['user_dong']} "
-                    f"/ 피드백 보상: {feedback['reward_score']}점"
+                    f"/ 피드백 보상: {feedback_reward_label}"
                 )
                 st.rerun()
 
@@ -1417,3 +1512,179 @@ with tab4:
         st.caption(
             "지도는 좌표가 매칭되는 시도 단위 데이터만 표시합니다. 지역을 유추할 수 없는 중앙부처나 기관은 '기타 기관'으로 묶어 표와 비율 그래프에 포함됩니다."
         )
+
+
+# =========================================================
+# 탭 5. 기존·신규 민원 목록
+# =========================================================
+
+with tab5:
+    st.subheader("5. 기존 및 신규 민원 목록")
+    st.caption("기존 국민신문고 민원과 앱에서 새로 접수한 신규 민원을 함께 조회합니다.")
+
+    list_df = df.copy().reset_index(drop=True)
+    list_df["source_type"] = list_df["faqNo"].astype(str).apply(
+        lambda x: "신규 민원" if x.startswith("USER_") else "기존 민원"
+    )
+
+    col_a, col_b, col_c = st.columns([1, 1, 2])
+
+    with col_a:
+        list_source = st.selectbox(
+            "목록 구분",
+            ["전체", "기존 민원", "신규 민원"],
+            key="complaint_list_source"
+        )
+
+    with col_b:
+        list_category_options = ["전체"] + sorted(list_df["category"].dropna().astype(str).unique().tolist())
+        list_category_options = list(dict.fromkeys(list_category_options))
+        list_category = st.selectbox(
+            "분야 선택",
+            list_category_options,
+            key="complaint_list_category"
+        )
+
+    with col_c:
+        search_keyword = st.text_input(
+            "검색어",
+            placeholder="민원 제목, 내용, 답변, 처리기관에서 검색",
+            key="complaint_list_search"
+        )
+
+    if list_source != "전체":
+        list_df = list_df[list_df["source_type"] == list_source]
+
+    if list_category != "전체":
+        list_df = list_df[list_df["category"] == list_category]
+
+    st.markdown("**지역·행정동·부서 필터**")
+    region_col1, region_col2, region_col3, region_col4 = st.columns(4)
+
+    with region_col1:
+        list_sido_options = clean_filter_options(list_df["sido"].dropna().astype(str).unique().tolist(), include_all=True)
+        list_sido = st.selectbox(
+            "시도/기관",
+            list_sido_options,
+            key="complaint_list_sido"
+        )
+
+    if list_sido != "전체":
+        list_df = list_df[list_df["sido"] == list_sido]
+
+    with region_col2:
+        list_sigungu_options = clean_filter_options(list_df["sigungu"].dropna().astype(str).unique().tolist(), include_all=True)
+        list_sigungu = st.selectbox(
+            "시군구/세부기관",
+            list_sigungu_options,
+            key="complaint_list_sigungu"
+        )
+
+    if list_sigungu != "전체":
+        list_df = list_df[list_df["sigungu"] == list_sigungu]
+
+    with region_col3:
+        list_dong_options = clean_filter_options(list_df["dong"].dropna().astype(str).unique().tolist(), include_all=True)
+        list_dong = st.selectbox(
+            "행정동",
+            list_dong_options,
+            key="complaint_list_dong"
+        )
+
+    if list_dong != "전체":
+        list_df = list_df[list_df["dong"] == list_dong]
+
+    with region_col4:
+        list_dept_options = clean_filter_options(list_df["dept_name"].dropna().astype(str).unique().tolist(), include_all=True)
+        list_dept = st.selectbox(
+            "부서",
+            list_dept_options,
+            key="complaint_list_dept"
+        )
+
+    if list_dept != "전체":
+        list_df = list_df[list_df["dept_name"] == list_dept]
+
+    if search_keyword.strip():
+        keyword = search_keyword.strip()
+        search_cols = [
+            "title", "question_text", "answer_text", "complaint_text",
+            "agency_name", "dept_name", "full_dept_name", "display_dept_name",
+            "sido", "sigungu", "dong"
+        ]
+        search_text = list_df[search_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        list_df = list_df[search_text.str.contains(keyword, case=False, na=False)]
+
+    list_df = list_df.sort_values("reg_date", ascending=False).reset_index(drop=True)
+
+    st.write(f"조회 결과: **{len(list_df):,}건**")
+
+    if len(list_df) == 0:
+        st.info("조건에 해당하는 민원이 없습니다.")
+    else:
+        preview_df = list_df[[
+            "source_type", "reg_date", "category", "title", "agency_name", "dept_name", "sido", "sigungu", "dong"
+        ]].head(50).copy()
+        preview_df["reg_date"] = pd.to_datetime(preview_df["reg_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        preview_df = preview_df.rename(columns={
+            "source_type": "구분",
+            "reg_date": "등록일",
+            "category": "분야",
+            "title": "제목",
+            "agency_name": "처리기관",
+            "dept_name": "처리부서",
+            "sido": "시도",
+            "sigungu": "시군구",
+            "dong": "행정동",
+        })
+        st.dataframe(preview_df, use_container_width=True)
+
+        list_df["_select_label"] = list_df.apply(build_complaint_list_label, axis=1)
+        selected_label = st.selectbox(
+            "상세 확인할 민원을 선택하세요",
+            list_df["_select_label"].tolist(),
+            key="complaint_detail_select"
+        )
+
+        selected_row = list_df[list_df["_select_label"] == selected_label].iloc[0]
+
+        st.divider()
+        st.subheader("민원 상세 내용")
+
+        detail_cols = st.columns(4)
+        detail_cols[0].metric("구분", safe_display_value(selected_row.get("source_type")))
+        detail_cols[1].metric("분야", safe_display_value(selected_row.get("category")))
+        detail_cols[2].metric("시도", safe_display_value(selected_row.get("sido")))
+        detail_cols[3].metric("시군구", safe_display_value(selected_row.get("sigungu")))
+
+        processed_full_name = safe_display_value(
+            selected_row.get("full_dept_name", ""),
+            default=combine_existing_dept_name(
+                selected_row.get("agency_name", ""),
+                selected_row.get("dept_name", "")
+            )
+        )
+
+        st.markdown("**처리 기관/부서**")
+        st.info(processed_full_name)
+
+        if safe_display_value(selected_row.get("dong", ""), default=""):
+            st.caption(f"행정동: {safe_display_value(selected_row.get('dong'))}")
+
+        st.markdown("**제목**")
+        st.write(safe_display_value(selected_row.get("title"), default="제목 없음"))
+
+        st.markdown("**민원 내용**")
+        question = safe_display_value(selected_row.get("question_text"), default="")
+        complaint_text = safe_display_value(selected_row.get("complaint_text"), default="")
+        st.write(question if question else complaint_text if complaint_text else "민원 내용이 없습니다.")
+
+        st.markdown("**답변 내용**")
+        answer = safe_display_value(selected_row.get("answer_text"), default="")
+        if answer:
+            st.write(answer)
+        else:
+            st.warning("신규 접수 민원이거나 답변 데이터가 없어 표시할 답변이 없습니다.")
+
+        if str(selected_row.get("faqNo", "")).startswith("USER_"):
+            st.caption("이 항목은 대시보드에서 신규 접수된 민원으로, 처리 완료 답변은 아직 등록되지 않은 상태입니다.")
