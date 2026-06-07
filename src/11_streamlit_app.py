@@ -1,6 +1,7 @@
 from pathlib import Path
 from collections import Counter
 from datetime import datetime
+import hashlib
 import re
 
 import pandas as pd
@@ -23,117 +24,90 @@ NEW_COMPLAINT_PATH = BASE_DIR / "output" / "tables" / "new_complaints.csv"
 
 
 # =========================================================
-# 2. 빈출 단어 불용어 설정
+# 2. 불용어 설정
 # =========================================================
 
 STOPWORDS = {
-    # 연결어 / 조사성 표현
     "그리고", "그러나", "하지만", "또한", "또는", "혹은", "및", "등", "등의",
     "에서", "으로", "에게", "부터", "까지", "보다", "처럼", "같은", "관련",
     "통해", "위해", "따라", "대한", "대해", "대하여", "관련하여", "관한",
+    "다음으로", "결론적으로", "따라서", "그러므로", "먼저", "특히", "이후",
+    "다만", "한편", "즉", "예를", "예시", "예컨대",
 
-    # 일반 대화 표현
     "같습니다", "연락주시면", "연락", "주시면", "귀하의", "귀하", "귀하는",
     "귀하께", "귀하께서", "저희", "저는", "제가", "우리", "안녕하세요",
     "안녕하십니까", "감사합니다", "부탁드립니다", "드립니다", "바랍니다",
     "문의드립니다", "알려주세요", "확인부탁드립니다", "확인바랍니다",
-    "답변부탁드립니다", "추가", "추가로", "추가적인", "가능할까요",
-    "어떻게", "언제", "어디서", "무엇", "누가", "왜", "하면", "해서",
+    "답변부탁드립니다", "추가", "추가로", "추가적인", "말씀드립니다",
 
-    # 민원/행정 상투어
     "민원", "민원인", "문의", "답변", "신청", "처리", "내용", "확인",
     "안내", "사항", "자료", "정보", "공공", "기관", "부서", "담당",
     "업무", "소관", "검토", "조치", "접수", "회신", "통보", "요청",
     "질의", "관련부서", "담당자", "민원처리", "처리결과", "담당부서",
 
-    # 의미 약한 일반 단어
     "가능", "경우", "해당", "것", "수", "이", "그", "저", "있는", "없는",
     "있음", "없음", "기타", "현재", "부분", "정도", "일부", "전체",
     "각각", "다음", "아래", "위의", "위한", "통한", "때문", "관련된",
 
-    # 서술어 / 문장 끝 표현
     "합니다", "됩니다", "있습니다", "없습니다", "하였습니다", "되었습니다",
     "가능합니다", "어렵습니다", "필요합니다", "안내드립니다", "알려드립니다",
     "확인됩니다", "처리됩니다", "생각합니다", "문의합니다", "요청합니다",
     "원합니다", "하십니다", "하였으며", "하겠습니다", "드리겠습니다",
     "되었습니다만", "됩니다만", "있으므로", "있으며", "없으며",
 
-    # 행정 문서 반복어
     "법령", "규정", "기준", "절차", "방법", "이용", "발급", "제출",
     "시행", "운영", "관리", "대상", "서비스", "제도", "사업", "공고",
     "홈페이지", "사이트", "온라인", "방문", "전화", "팩스", "서류",
 
-    # 너무 포괄적인 단어
     "지역", "주민", "국민", "시민", "사람", "문제", "사유", "사례",
-    "결과", "상황", "일반", "다만",
-
-    "다음으로", "결론적으로", "따라서", "그러므로", "먼저", "특히", "이후",
-    "또한", "다만", "한편", "그리고", "그러나", "하지만",
-    "관련하여", "관련된", "해당하는", "해당됩니다",
-    "설명드립니다", "말씀드립니다", "안내드립니다",
-    "확인하여", "검토하여", "처리하여", "조치하여",
-    "있습니다", "없습니다", "같습니다", "됩니다", "합니다",
-    "필요합니다", "가능합니다", "어렵습니다",
-    "문의하신", "답변드립니다", "연락주시면", "귀하의",
+    "결과", "상황", "일반", "마다", "여부", "해당됩니다", "말씀",
 }
 
 GENERIC_SUFFIXES = (
     "합니다", "됩니다", "있습니다", "없습니다", "드립니다", "바랍니다",
     "하였습니다", "되었습니다", "하겠습니다", "드리겠습니다", "같습니다",
     "주시면", "주세요", "입니다", "되나요", "되었나요", "인가요",
-    "드립니다만", "합니다만", "있을까요", "가능한가요", "가능할까요",
+    "드립니다만", "합니다만", "있을까요", "가능한가요",
 )
 
 
 # =========================================================
-# 3. 분야별 가상 담당부서 및 이메일
+# 3. 지역 키워드 / 좌표
 # =========================================================
 
-CATEGORY_DEPT_MAP = {
-    "교통": [
-        {"dept": "교통관리과", "email": "traffic@demo-minwon.kr"},
-        {"dept": "주차단속과", "email": "parking@demo-minwon.kr"},
-        {"dept": "대중교통과", "email": "bus@demo-minwon.kr"},
-    ],
-    "환경": [
-        {"dept": "환경정책과", "email": "environment@demo-minwon.kr"},
-        {"dept": "자원순환과", "email": "recycle@demo-minwon.kr"},
-        {"dept": "청소행정과", "email": "clean@demo-minwon.kr"},
-    ],
-    "복지": [
-        {"dept": "복지정책과", "email": "welfare@demo-minwon.kr"},
-        {"dept": "생활보장과", "email": "support@demo-minwon.kr"},
-        {"dept": "노인복지과", "email": "senior@demo-minwon.kr"},
-    ],
-    "교육": [
-        {"dept": "교육지원과", "email": "education@demo-minwon.kr"},
-        {"dept": "평생학습과", "email": "lifelong@demo-minwon.kr"},
-    ],
-    "안전": [
-        {"dept": "안전총괄과", "email": "safety@demo-minwon.kr"},
-        {"dept": "재난관리과", "email": "disaster@demo-minwon.kr"},
-    ],
-    "세금·재정": [
-        {"dept": "세정과", "email": "tax@demo-minwon.kr"},
-        {"dept": "재정관리과", "email": "finance@demo-minwon.kr"},
-    ],
-    "문화·관광": [
-        {"dept": "문화예술과", "email": "culture@demo-minwon.kr"},
-        {"dept": "관광진흥과", "email": "tour@demo-minwon.kr"},
-    ],
-    "주택·건축": [
-        {"dept": "주택과", "email": "housing@demo-minwon.kr"},
-        {"dept": "건축과", "email": "building@demo-minwon.kr"},
-    ],
-    "기타": [
-        {"dept": "민원총괄과", "email": "civil@demo-minwon.kr"},
-    ],
+REGION_KEYWORDS = {
+    "서울특별시": ["서울특별시", "서울시", "서울교육청", "서울특별시교육청", "서울"],
+    "부산광역시": ["부산광역시", "부산시", "부산교육청", "부산광역시교육청", "부산"],
+    "대구광역시": ["대구광역시", "대구시", "대구교육청", "대구광역시교육청", "대구"],
+    "인천광역시": ["인천광역시", "인천시", "인천교육청", "인천광역시교육청", "인천"],
+    "광주광역시": ["광주광역시", "광주시", "광주교육청", "광주광역시교육청", "광주"],
+    "대전광역시": ["대전광역시", "대전시", "대전교육청", "대전광역시교육청", "대전"],
+    "울산광역시": ["울산광역시", "울산시", "울산교육청", "울산광역시교육청", "울산"],
+    "세종특별자치시": ["세종특별자치시", "세종시", "세종교육청", "세종"],
+    "경기도": ["경기도", "경기교육청", "경기도교육청", "경기"],
+    "강원특별자치도": ["강원특별자치도", "강원도", "강원교육청", "강원"],
+    "충청북도": ["충청북도", "충북", "충북교육청"],
+    "충청남도": ["충청남도", "충남", "충남교육청"],
+    "전북특별자치도": ["전북특별자치도", "전라북도", "전북", "전북교육청"],
+    "전라남도": ["전라남도", "전남", "전남교육청"],
+    "경상북도": ["경상북도", "경북", "경북교육청"],
+    "경상남도": ["경상남도", "경남", "경남교육청"],
+    "제주특별자치도": ["제주특별자치도", "제주도", "제주교육청", "제주"],
 }
 
 
-# =========================================================
-# 4. 시도 좌표
-# =========================================================
+METRO_SIDOS = {
+    "서울특별시", "부산광역시", "대구광역시", "인천광역시",
+    "광주광역시", "대전광역시", "울산광역시", "세종특별자치시",
+}
+
+PROVINCE_SIDOS = {
+    "경기도", "강원특별자치도", "충청북도", "충청남도",
+    "전북특별자치도", "전라남도", "경상북도", "경상남도",
+    "제주특별자치도",
+}
+
+ALL_SIDO_NAMES = set(REGION_KEYWORDS.keys()) | METRO_SIDOS | PROVINCE_SIDOS
 
 SIDO_COORDS = {
     "서울특별시": {"lat": 37.5665, "lon": 126.9780},
@@ -157,42 +131,225 @@ SIDO_COORDS = {
 
 
 # =========================================================
-# 5. 기관명 기반 지역 추론
+# 4. 분야별 기본 후보명 - 실제 데이터 후보가 없을 때만 참고용으로 사용하지 않음
 # =========================================================
 
+CATEGORY_DEPT_HINTS = {
+    "교통": ["교통", "주차", "버스", "도로", "대중교통"],
+    "환경": ["환경", "청소", "자원", "폐기", "녹지", "위생"],
+    "복지": ["복지", "생활", "노인", "장애", "아동", "여성"],
+    "교육": ["교육", "학교", "평생", "학습", "장학"],
+    "안전": ["안전", "재난", "방재", "민방위"],
+    "세금·재정": ["세정", "세무", "재정", "회계", "징수"],
+    "문화·관광": ["문화", "관광", "체육", "예술"],
+    "주택·건축": ["주택", "건축", "건설", "도시", "개발"],
+    "기타": ["민원", "감사", "총괄", "행정", "자치"],
+}
+
+# 수동 분야 키워드 사전은 사용하지 않는다.
+# 신규 민원 분류는 API 데이터에서 추출한 분야별 토큰 가중치만 사용한다.
+
+
+# =========================================================
+# 5. 텍스트/지역 처리 함수
+# =========================================================
+
+
 def infer_sido_from_text(text):
-    text = str(text).replace(" ", "")
+    """기관명/지역 문자열에서 시도명을 추론한다.
 
-    region_keywords = {
-        "서울특별시": ["서울특별시", "서울시", "서울교육청", "서울특별시교육청", "서울"],
-        "부산광역시": ["부산광역시", "부산시", "부산교육청", "부산광역시교육청", "부산"],
-        "대구광역시": ["대구광역시", "대구시", "대구교육청", "대구광역시교육청", "대구"],
-        "인천광역시": ["인천광역시", "인천시", "인천교육청", "인천광역시교육청", "인천"],
-        "광주광역시": ["광주광역시", "광주시", "광주교육청", "광주광역시교육청", "광주"],
-        "대전광역시": ["대전광역시", "대전시", "대전교육청", "대전광역시교육청", "대전"],
-        "울산광역시": ["울산광역시", "울산시", "울산교육청", "울산광역시교육청", "울산"],
-        "세종특별자치시": ["세종특별자치시", "세종시", "세종교육청", "세종특별자치시교육청", "세종"],
-        "경기도": ["경기도", "경기교육청", "경기도교육청", "경기"],
-        "강원특별자치도": ["강원특별자치도", "강원도", "강원교육청", "강원특별자치도교육청", "강원"],
-        "충청북도": ["충청북도", "충북", "충북교육청", "충청북도교육청"],
-        "충청남도": ["충청남도", "충남", "충남교육청", "충청남도교육청"],
-        "전북특별자치도": ["전북특별자치도", "전라북도", "전북", "전북교육청", "전라북도교육청"],
-        "전라남도": ["전라남도", "전남", "전남교육청", "전라남도교육청"],
-        "경상북도": ["경상북도", "경북", "경북교육청", "경상북도교육청"],
-        "경상남도": ["경상남도", "경남", "경남교육청", "경상남도교육청"],
-        "제주특별자치도": ["제주특별자치도", "제주도", "제주교육청", "제주특별자치도교육청", "제주"],
-    }
+    기존 방식은 REGION_KEYWORDS 순서대로 검사해서 문자열 안에 "서울"이 한 번이라도 있으면
+    서울특별시로 먼저 분류되는 문제가 있었다. 그래서 모든 지역 키워드를 한 번에 검사한 뒤,
+    가장 긴 키워드가 매칭된 시도를 우선한다. 예를 들어 "울산광역시 ... 서울"처럼 다른 지역명이
+    섞여 있어도 "울산광역시"가 "서울"보다 길기 때문에 울산광역시로 분류된다.
+    """
+    compact = str(text).replace(" ", "")
+    matches = []
 
-    for sido, keywords in region_keywords.items():
+    for sido, keywords in REGION_KEYWORDS.items():
         for keyword in keywords:
-            if keyword in text:
-                return sido
+            key = str(keyword).replace(" ", "")
+            if key and key in compact:
+                matches.append((len(key), sido))
+
+    if matches:
+        matches.sort(reverse=True)
+        return matches[0][1]
 
     return "기타 기관"
 
 
+def _remove_sido_keywords(text, sido):
+    compact = re.sub(r"\s+", "", str(text))
+
+    # 선택된 시도의 전체명/약칭을 먼저 제거한다.
+    for keyword in REGION_KEYWORDS.get(sido, []):
+        compact = compact.replace(str(keyword).replace(" ", ""), " ")
+
+    # 행정기관명에서 반복되는 상위기관 표현도 제거한다.
+    compact = compact.replace("특별시", " ").replace("광역시", " ")
+    compact = compact.replace("특별자치시", " ").replace("특별자치도", " ")
+    compact = compact.replace("교육청", " ").replace("시청", " ").replace("도청", " ")
+
+    return compact
+
+
+def extract_sigungu_by_sido(text, sido):
+    """시도 유형에 따라 2단계 지역명을 추출한다.
+
+    - 서울특별시/광역시/세종특별자치시: 강서구, 강남구, 유성구 등 구/군 중심
+    - 도 단위: 수원시, 청주시, 양평군 등 시/군 중심
+    - 중복된 "전체" 또는 다른 시도명이 2단계 필터에 들어가지 않도록 정리
+    """
+    sido = str(sido).strip() if str(sido).strip() else infer_sido_from_text(text)
+    compact = _remove_sido_keywords(text, sido)
+
+    # 광역시/특별시는 구/군 단위로 분류한다.
+    if sido in METRO_SIDOS:
+        candidates = re.findall(r"[가-힣A-Za-z0-9]{1,12}?(?:구|군)", compact)
+        for cand in candidates:
+            cand = re.sub(r"[^가-힣A-Za-z0-9]", "", cand)
+            if cand and cand not in ALL_SIDO_NAMES and not cand.endswith(("광역시", "특별시", "특별자치시", "도")):
+                return cand
+        return "전체"
+
+    # 도 단위는 시/군 단위로 분류한다. 구가 있어도 상위 시를 우선한다.
+    if sido in PROVINCE_SIDOS:
+        candidates = re.findall(r"[가-힣A-Za-z0-9]{1,12}?(?:시|군)", compact)
+        for cand in candidates:
+            cand = re.sub(r"[^가-힣A-Za-z0-9]", "", cand)
+            if not cand:
+                continue
+            if cand in ALL_SIDO_NAMES:
+                continue
+            if cand.endswith(("광역시", "특별시", "특별자치시")):
+                continue
+            return cand
+        return "전체"
+
+    return "전체"
+
+
+def extract_sigungu(text):
+    sido = infer_sido_from_text(text)
+    return extract_sigungu_by_sido(text, sido)
+
+
+def clean_filter_options(values, include_all=True):
+    """Streamlit 선택박스에서 빈 값/중복 전체/NaN/상위 시도명이 섞이는 문제를 방지한다."""
+    cleaned = []
+    seen = set()
+
+    for value in values:
+        item = str(value).strip()
+        if item in {"", "nan", "None", "NaN", "전체"}:
+            continue
+        if item in seen:
+            continue
+        seen.add(item)
+        cleaned.append(item)
+
+    cleaned = sorted(cleaned)
+    return (["전체"] + cleaned) if include_all else cleaned
+
+
+def extract_dong(text):
+    text = re.sub(r"\s+", " ", str(text).strip())
+    tokens = text.split()
+    for token in tokens:
+        clean = re.sub(r"[^가-힣A-Za-z0-9]", "", token)
+        if clean.endswith(("동", "읍", "면", "리")):
+            return clean
+    return ""
+
+
+def parse_location(location_text):
+    text = str(location_text).strip()
+    sido = infer_sido_from_text(text)
+    sigungu = extract_sigungu_by_sido(text, sido)
+    dong = extract_dong(text)
+    return {
+        "raw": text,
+        "sido": sido,
+        "sigungu": sigungu,
+        "dong": dong,
+    }
+
+
+def normalize_text(text):
+    return re.sub(r"\s+", "", str(text).lower())
+
+
+def make_fake_email(full_name):
+    seed = hashlib.md5(str(full_name).encode("utf-8")).hexdigest()[:8]
+    return f"dept-{seed}@demo-minwon.kr"
+
+
+def combine_existing_dept_name(agency_name, dept_name):
+    agency_name = str(agency_name).strip()
+    dept_name = str(dept_name).strip()
+
+    if not agency_name:
+        return dept_name
+    if not dept_name:
+        return agency_name
+    if normalize_text(agency_name) in normalize_text(dept_name):
+        return dept_name
+    return f"{agency_name} {dept_name}"
+
+
+def clean_display_dept_name(agency_name, dept_name):
+    """추천 부서 표시명을 실제 기관/부서 단위까지만 짧게 정리한다."""
+    agency_name = str(agency_name).strip()
+    dept_name = str(dept_name).strip()
+    full_name = combine_existing_dept_name(agency_name, dept_name)
+    full_name = re.sub(r"\s+", " ", full_name).strip()
+
+    # 경찰서/소방서처럼 기관 자체가 민원 처리 단위인 경우, 하위 담당관명은 생략한다.
+    station_match = re.search(r"^(.+?(?:경찰서|소방서|세무서|보건소|교육지원청|지원청))", full_name)
+    if station_match:
+        return station_match.group(1).strip()
+
+    # 일반 부서는 과/관/실/팀/센터 단위까지만 표시한다.
+    unit_match = re.search(
+        r"^(.+?(?:[가-힣A-Za-z0-9]{2,30}과|[가-힣A-Za-z0-9]{2,30}관|[가-힣A-Za-z0-9]{2,30}실|[가-힣A-Za-z0-9]{2,30}팀|[가-힣A-Za-z0-9]{2,30}센터))",
+        full_name,
+    )
+    if unit_match:
+        return unit_match.group(1).strip()
+
+    return full_name
+
+
+def tokenize_text(text):
+    words = re.findall(r"[가-힣a-zA-Z0-9]{2,}", str(text))
+    cleaned = []
+    for word in words:
+        word = word.strip()
+        if len(word) < 2:
+            continue
+        if word in STOPWORDS:
+            continue
+        if word.isdigit():
+            continue
+        if word.endswith(GENERIC_SUFFIXES):
+            continue
+        if "귀하" in word or "연락" in word:
+            continue
+        if "문의" in word and len(word) <= 8:
+            continue
+        if "답변" in word and len(word) <= 8:
+            continue
+        if "확인" in word and len(word) <= 8:
+            continue
+        if "안내" in word and len(word) <= 8:
+            continue
+        cleaned.append(word)
+    return cleaned
+
+
 # =========================================================
-# 6. 데이터 로드 및 모델 학습
+# 6. 데이터 로드 및 전처리
 # =========================================================
 
 @st.cache_data
@@ -206,6 +363,7 @@ def load_data():
     text_cols = [
         "faqNo", "title", "question_text", "answer_text", "complaint_text",
         "category", "agency_name", "dept_name", "region", "month",
+        "user_location", "user_sido", "user_sigungu", "user_dong",
     ]
 
     for col in text_cols:
@@ -215,119 +373,377 @@ def load_data():
 
     if "reg_date" not in df.columns:
         df["reg_date"] = ""
-
     df["reg_date"] = pd.to_datetime(df["reg_date"], errors="coerce")
     df = df.dropna(subset=["reg_date"])
 
     df["region_source_text"] = (
-        df["agency_name"].astype(str)
-        + " "
-        + df["region"].astype(str)
-        + " "
-        + df["dept_name"].astype(str)
+        df["agency_name"].astype(str) + " " +
+        df["region"].astype(str) + " " +
+        df["dept_name"].astype(str) + " " +
+        df["user_location"].astype(str)
     )
 
-    df["sido"] = df["region_source_text"].apply(infer_sido_from_text)
+    inferred_sido = df["region_source_text"].apply(infer_sido_from_text)
+    inferred_sigungu = pd.Series(
+        [extract_sigungu_by_sido(text_value, sido_value) for text_value, sido_value in zip(df["region_source_text"], inferred_sido)],
+        index=df.index,
+    )
+    inferred_dong = df["user_location"].apply(extract_dong)
 
-    agency_parts = df["agency_name"].str.split()
-    df["sigungu"] = agency_parts.str[1].fillna("전체")
+    df["sido"] = df["user_sido"].where(df["user_sido"].str.len() > 0, inferred_sido)
+    df["sigungu"] = df["user_sigungu"].where(df["user_sigungu"].str.len() > 0, inferred_sigungu)
+    df["dong"] = df["user_dong"].where(df["user_dong"].str.len() > 0, inferred_dong)
+
+    df.loc[df["sido"] == "", "sido"] = "기타 기관"
     df.loc[df["sigungu"] == "", "sigungu"] = "전체"
+
+    # 시군구/세부기관 필터에 시도명이 다시 들어가거나 "전체"가 중복되는 문제 방지
+    invalid_sigungu_values = ALL_SIDO_NAMES | {"", "nan", "None", "NaN"}
+    df.loc[df["sigungu"].isin(invalid_sigungu_values), "sigungu"] = "전체"
+
+    # 특별시/광역시는 2단계가 구/군 단위여야 하므로, 잘못 들어온 광역시/도명은 제거
+    bad_sigungu_mask = df["sigungu"].astype(str).str.endswith(("광역시", "특별시", "특별자치시", "특별자치도", "도"))
+    df.loc[bad_sigungu_mask, "sigungu"] = "전체"
+
+    df["full_dept_name"] = df.apply(
+        lambda row: combine_existing_dept_name(row.get("agency_name", ""), row.get("dept_name", "")),
+        axis=1,
+    )
+    df["display_dept_name"] = df.apply(
+        lambda row: clean_display_dept_name(row.get("agency_name", ""), row.get("dept_name", "")),
+        axis=1,
+    )
 
     return df
 
 
 @st.cache_resource
 def train_model(df):
-    train_df = df[
-        (df["complaint_text"].str.len() > 20)
-        & (df["category"].str.len() > 0)
-    ].copy()
+    train_df = df[(df["complaint_text"].str.len() > 20) & (df["category"].str.len() > 0)].copy()
 
     model = Pipeline([
-        (
-            "tfidf",
-            TfidfVectorizer(
-                max_features=25000,
-                ngram_range=(1, 2),
-                token_pattern=r"(?u)\b[가-힣a-zA-Z0-9]{2,}\b"
-            )
-        ),
-        (
-            "clf",
-            LogisticRegression(
-                max_iter=1000,
-                class_weight="balanced"
-            )
-        )
+        ("tfidf", TfidfVectorizer(
+            max_features=25000,
+            ngram_range=(1, 2),
+            token_pattern=r"(?u)\b[가-힣a-zA-Z0-9]{2,}\b",
+        )),
+        ("clf", LogisticRegression(max_iter=1000, class_weight="balanced")),
     ])
 
     model.fit(train_df["complaint_text"], train_df["category"])
     return model
 
 
-# =========================================================
-# 7. 유틸 함수
-# =========================================================
-
-def tokenize_text(text):
-    words = re.findall(r"[가-힣a-zA-Z0-9]{2,}", str(text))
-    cleaned = []
-
-    for word in words:
-        word = word.strip()
-
-        if len(word) < 2:
-            continue
-        if word in STOPWORDS:
-            continue
-        if word.isdigit():
-            continue
-        if word.endswith(GENERIC_SUFFIXES):
-            continue
-        if "귀하" in word:
-            continue
-        if "연락" in word:
-            continue
-        if "문의" in word and len(word) <= 8:
-            continue
-        if "답변" in word and len(word) <= 8:
-            continue
-        if "확인" in word and len(word) <= 8:
-            continue
-        if "안내" in word and len(word) <= 8:
-            continue
-
-        cleaned.append(word)
-
-    return cleaned
-
 @st.cache_data
 def get_common_words_by_category(df, min_category_count=4):
     word_category_count = {}
-
     for category, group in df.groupby("category"):
         category_words = set()
-
         for text in group["complaint_text"].dropna().astype(str).head(3000):
-            words = tokenize_text(text)
-            category_words.update(words)
-
+            category_words.update(tokenize_text(text))
         for word in category_words:
             word_category_count[word] = word_category_count.get(word, 0) + 1
+    return {word for word, count in word_category_count.items() if count >= min_category_count}
 
-    common_words = {
-        word
-        for word, category_count in word_category_count.items()
-        if category_count >= min_category_count
+
+# =========================================================
+# 7. 분야별 키워드 가중치 기반 예측 보정
+# =========================================================
+
+
+@st.cache_data
+def build_category_keyword_weights(df, top_n=250):
+    """기타를 제외한 분야별 대표 단어 가중치를 만든다.
+    수동 키워드 사전은 사용하지 않고, API 원천 데이터에서 전처리·토큰화된 단어 빈도만 사용한다.
+    여러 분야에 공통으로 많이 등장하는 단어는 대표성이 낮으므로 제외한다.
+    """
+    common_words = get_common_words_by_category(df, min_category_count=4)
+    weights = {}
+    valid_categories = [
+        c for c in sorted(df["category"].dropna().unique().tolist())
+        if c != "기타"
+    ]
+
+    for category in valid_categories:
+        group = df[df["category"] == category]
+        counter = Counter()
+
+        for text in group["complaint_text"].dropna().astype(str).head(5000):
+            words = [w for w in tokenize_text(text) if w not in common_words]
+            counter.update(words)
+
+        category_weights = {}
+        if counter:
+            max_count = max(counter.values())
+            category_weights = {
+                word: count / max_count
+                for word, count in counter.most_common(top_n)
+            }
+
+        weights[category] = category_weights
+
+    return weights
+
+
+def predict_category_with_keyword_weights(model, df, user_text):
+    """API 데이터에서 추출한 분야별 토큰 가중치로 신규 민원 분야를 확률화한다.
+    기타를 제외한 분야 중 토큰 가중치가 0보다 큰 분야가 하나라도 있으면 해당 분야들을 우선 추천하고,
+    모든 분야의 데이터 기반 토큰 가중치가 0일 때만 기타 100%로 처리한다.
+    """
+    keyword_weights = build_category_keyword_weights(df)
+    words = tokenize_text(user_text)
+    normalized_text = normalize_text(user_text)
+
+    keyword_scores = {}
+    for category, weights in keyword_weights.items():
+        if category == "기타":
+            continue
+
+        score = 0.0
+
+        # 1) 토큰 단위 매칭
+        for word in words:
+            score += weights.get(word, 0.0)
+
+        # 2) 원문 부분문자열 매칭: 마을버스, 불법주정차처럼 붙어 있는 단어 보정
+        for keyword, weight in weights.items():
+            if keyword and normalize_text(keyword) in normalized_text:
+                score += float(weight)
+
+        # 아주 약한 단어도 0보다 크면 분야 후보로 인정한다.
+        keyword_scores[category] = score
+
+    positive_scores = {category: score for category, score in keyword_scores.items() if score > 0}
+
+    if not positive_scores:
+        categories = sorted(df["category"].dropna().unique().tolist())
+        if "기타" not in categories:
+            categories.append("기타")
+        rows = []
+        for category in categories:
+            rows.append({
+                "category": category,
+                "probability": 1.0 if category == "기타" else 0.0,
+                "probability_percent": 100.0 if category == "기타" else 0.0,
+            })
+        return pd.DataFrame(rows).sort_values("probability_percent", ascending=False)
+
+    # 모델 확률은 보조값으로만 사용한다. 관련 키워드가 있으면 기타는 제외한다.
+    model_probs = {}
+    try:
+        probs = model.predict_proba([user_text])[0]
+        for cls, prob in zip(model.classes_, probs):
+            model_probs[cls] = float(prob)
+    except Exception:
+        model_probs = {}
+
+    combined = {}
+    max_keyword = max(positive_scores.values())
+    for category, score in positive_scores.items():
+        keyword_part = score / max_keyword if max_keyword > 0 else 0.0
+        model_part = model_probs.get(category, 0.0)
+        combined[category] = 0.85 * keyword_part + 0.15 * model_part
+
+    total = sum(combined.values())
+    rows = []
+    for category, score in combined.items():
+        prob = score / total if total > 0 else 0.0
+        rows.append({
+            "category": category,
+            "probability": prob,
+            "probability_percent": round(prob * 100, 2),
+        })
+
+    return pd.DataFrame(rows).sort_values("probability_percent", ascending=False)
+
+
+# =========================================================
+# 7. 실제 데이터 기반 부서 추천
+# =========================================================
+
+
+
+def build_local_representative_contact(user_location):
+    """추천할 실제 지역 부서가 없을 때 사용할 대표연락처 후보를 만든다.
+    주소의 번지수는 제외하고 시도/시군구/행정동까지만 사용한다.
+    선택창에는 '대표 연락처 : 서울특별시 강서구 마곡동 행정복지센터' 형식으로 표시한다.
+    """
+    loc = parse_location(user_location)
+    sido = loc.get("sido", "기타 기관")
+    sigungu = loc.get("sigungu", "전체")
+    dong = loc.get("dong", "")
+
+    if sido != "기타 기관" and sigungu != "전체" and dong:
+        agency_name = f"{sido} {sigungu} {dong} 행정복지센터"
+    elif sido != "기타 기관" and sigungu != "전체":
+        agency_name = f"{sido} {sigungu}청"
+    elif sido != "기타 기관":
+        agency_name = f"{sido}청"
+    else:
+        agency_name = "기타 기관"
+
+    display_name = f"대표 연락처 : {agency_name}"
+
+    return {
+        "agency": agency_name,
+        "dept": "대표연락처",
+        "full_dept": display_name,
+        "display_dept": display_name,
+        "email": make_fake_email(display_name),
+        "count": 0,
+        "is_representative_contact": True,
     }
 
-    return common_words
+
+def recommend_departments_from_data(df, user_location, selected_category, max_items=10):
+    """입력 지역과 선택 분야를 바탕으로 실제 데이터에 존재하는 기관/부서만 추천한다.
+
+    수정 원칙
+    1. 사용자가 시군구를 입력한 경우, 같은 시군구 후보만 추천한다.
+    2. 같은 시도 안이라도 다른 구/군/시는 추천하지 않는다.
+       예: 서울특별시 강서구 입력 시 중구·광진구 후보 제외.
+    3. 같은 시군구에 선택 분야의 실제 후보가 없으면 다른 지역 후보를 가져오지 않고
+       대표 연락처 후보만 제공한다.
+    4. 감사담당관/총무/기획 등 일반 행정부서만 잡히는 경우도 추천하지 않고 대표 연락처를 제공한다.
+    """
+    loc = parse_location(user_location)
+    sido = loc["sido"]
+    sigungu = loc["sigungu"]
+
+    representative = build_local_representative_contact(user_location)
+
+    base = df.copy()
+    base = base[(base["agency_name"].str.len() > 0) & (base["dept_name"].str.len() > 0)]
+    base = base[~base["faqNo"].astype(str).str.startswith("USER_")]
+
+    if len(base) == 0:
+        return [representative]
+
+    # 기타가 아닌 분야는 반드시 해당 분야로 분류된 기존 데이터만 후보로 사용한다.
+    if selected_category != "기타":
+        candidate_base = base[base["category"] == selected_category].copy()
+    else:
+        candidate_base = base.copy()
+
+    if len(candidate_base) == 0:
+        return [representative]
+
+    # 표시명 생성
+    if "display_dept_name" not in candidate_base.columns:
+        candidate_base["display_dept_name"] = candidate_base.apply(
+            lambda row: clean_display_dept_name(row.get("agency_name", ""), row.get("dept_name", "")),
+            axis=1,
+        )
+    if "full_dept_name" not in candidate_base.columns:
+        candidate_base["full_dept_name"] = candidate_base.apply(
+            lambda row: combine_existing_dept_name(row.get("agency_name", ""), row.get("dept_name", "")),
+            axis=1,
+        )
+
+    def row_text(row):
+        return normalize_text(" ".join([
+            str(row.get("agency_name", "")),
+            str(row.get("dept_name", "")),
+            str(row.get("display_dept_name", "")),
+            str(row.get("full_dept_name", "")),
+        ]))
+
+    candidate_base["_route_text"] = candidate_base.apply(row_text, axis=1)
+    sido_norm = normalize_text(sido)
+    sigungu_norm = normalize_text(sigungu)
+
+    # 1순위는 입력한 시군구/구청 단위다.
+    if sigungu != "전체":
+        local_base = candidate_base[
+            candidate_base["_route_text"].str.contains(sigungu_norm, na=False)
+        ].copy()
+
+        # 시도까지 확인 가능한 경우에는 같은 시도 안의 해당 시군구만 허용한다.
+        if sido != "기타 기관" and len(local_base) > 0:
+            same_sido_local = local_base[
+                local_base["_route_text"].str.contains(sido_norm, na=False)
+            ].copy()
+            if len(same_sido_local) > 0:
+                local_base = same_sido_local
+
+        # 같은 시군구에 후보가 없으면 다른 구/군/시 후보를 가져오지 않는다.
+        if len(local_base) == 0:
+            return [representative]
+
+        scoped_base = local_base
+
+    elif sido != "기타 기관":
+        # 시군구가 없는 경우에만 시도 단위 후보를 허용한다.
+        scoped_base = candidate_base[
+            candidate_base["_route_text"].str.contains(sido_norm, na=False)
+        ].copy()
+        if len(scoped_base) == 0:
+            return [representative]
+    else:
+        return [representative]
+
+    group_cols = ["agency_name", "dept_name", "full_dept_name", "display_dept_name"]
+
+    summary = (
+        scoped_base.groupby(group_cols, dropna=False)
+        .size()
+        .reset_index(name="category_count")
+    )
+
+    if len(summary) == 0:
+        return [representative]
+
+    # 일반 행정부서는 후보에서 제외한다. 해당 지역에 실제 추천할 만한 과가 없으면 대표 연락처만 제공한다.
+    generic_pattern = re.compile(
+        r"감사|총무|기획|홍보|민원여권|민원총괄|자치행정|행정지원|운영지원|비서|정책기획|예산|회계"
+    )
+    summary["is_generic"] = summary.apply(
+        lambda row: bool(generic_pattern.search(str(row.get("display_dept_name", "")) + " " + str(row.get("dept_name", "")))),
+        axis=1,
+    )
+
+    non_generic = summary[~summary["is_generic"]].copy()
+    if len(non_generic) == 0 and selected_category != "기타":
+        return [representative]
+    if len(non_generic) > 0:
+        summary = non_generic
+
+    summary = (
+        summary.sort_values(["category_count", "display_dept_name"], ascending=[False, True])
+        .drop_duplicates(subset=["display_dept_name"], keep="first")
+        .head(max_items)
+    )
+
+    results = []
+    for _, row in summary.iterrows():
+        full_name = str(row["full_dept_name"])
+        display_name = str(row["display_dept_name"])
+        results.append({
+            "agency": row["agency_name"],
+            "dept": row["dept_name"],
+            "full_dept": full_name,
+            "display_dept": display_name,
+            "email": make_fake_email(full_name),
+            "count": int(row["category_count"]),
+            "score": float(row["category_count"]),
+        })
+
+    # 대표 연락처는 항상 마지막 대체 선택지로 제공한다.
+    if representative["display_dept"] not in {item.get("display_dept") for item in results}:
+        results.append(representative)
+
+    return results
 
 
-def save_new_complaint(user_text, predicted_category, selected_dept, selected_email):
+# =========================================================
+# 8. 신규 민원 저장
+# =========================================================
+
+
+def save_new_complaint(user_text, user_location, predicted_category, selected_agency, selected_dept, selected_full_dept, selected_email):
     NEW_COMPLAINT_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     now = datetime.now()
+    loc = parse_location(user_location)
 
     new_row = pd.DataFrame([{
         "faqNo": f"USER_{now.strftime('%Y%m%d%H%M%S')}",
@@ -336,12 +752,17 @@ def save_new_complaint(user_text, predicted_category, selected_dept, selected_em
         "answer_text": "",
         "complaint_text": user_text,
         "category": predicted_category,
-        "agency_name": "사용자 신규 민원",
+        "agency_name": selected_agency,
         "dept_name": selected_dept,
-        "region": "사용자입력",
+        "full_dept_name": selected_full_dept,
+        "region": loc["sido"],
         "reg_date": now.strftime("%Y-%m-%d"),
         "text_length": len(user_text),
         "month": now.strftime("%Y-%m"),
+        "user_location": user_location,
+        "user_sido": loc["sido"],
+        "user_sigungu": loc["sigungu"],
+        "user_dong": loc["dong"],
         "forward_email": selected_email,
     }])
 
@@ -350,22 +771,21 @@ def save_new_complaint(user_text, predicted_category, selected_dept, selected_em
         new_row = pd.concat([old_df, new_row], ignore_index=True)
 
     new_row.to_csv(NEW_COMPLAINT_PATH, index=False, encoding="utf-8-sig")
+    return new_row.iloc[-1].to_dict()
+
+
+# =========================================================
+# 9. 그래프 함수
+# =========================================================
 
 
 def compress_top_n(df, label_col, value_col, top_n=15):
     temp = df.sort_values(value_col, ascending=False).copy()
-
     if len(temp) <= top_n:
         return temp
-
     top_df = temp.head(top_n).copy()
     rest_sum = temp.iloc[top_n:][value_col].sum()
-
-    other_row = pd.DataFrame([{
-        label_col: "기타",
-        value_col: rest_sum
-    }])
-
+    other_row = pd.DataFrame([{label_col: "기타", value_col: rest_sum}])
     return pd.concat([top_df, other_row], ignore_index=True)
 
 
@@ -377,20 +797,15 @@ def make_color_sequence(n):
         + px.colors.qualitative.Bold
         + px.colors.qualitative.Dark24
     )
-
     if n <= len(base):
         return base[:n]
-
-    return px.colors.sample_colorscale(
-        "Turbo",
-        [i / max(n - 1, 1) for i in range(n)]
-    )
+    return px.colors.sample_colorscale("Turbo", [i / max(n - 1, 1) for i in range(n)])
 
 
 def draw_barh_plotly(df, label_col, value_col, title, x_title="건수", top_n=15):
     plot_df = compress_top_n(df, label_col, value_col, top_n=top_n)
     plot_df = plot_df.sort_values(value_col, ascending=True)
-
+    colors = make_color_sequence(len(plot_df))
     fig = px.bar(
         plot_df,
         x=value_col,
@@ -398,10 +813,9 @@ def draw_barh_plotly(df, label_col, value_col, title, x_title="건수", top_n=15
         orientation="h",
         text=value_col,
         color=label_col,
-        color_discrete_sequence=make_color_sequence(len(plot_df)),
+        color_discrete_sequence=colors,
         title=title,
     )
-
     fig.update_layout(
         showlegend=False,
         height=max(450, 38 * len(plot_df)),
@@ -410,7 +824,6 @@ def draw_barh_plotly(df, label_col, value_col, title, x_title="건수", top_n=15
         margin=dict(l=20, r=40, t=60, b=30),
         font=dict(family="Arial, Malgun Gothic, AppleGothic, sans-serif", size=14),
     )
-
     fig.update_traces(textposition="outside")
     return fig
 
@@ -431,7 +844,7 @@ def draw_line_plotly(df, x_col, y_col, title):
 def draw_percent_bar_plotly(df, label_col, value_col, title, top_n=15):
     plot_df = compress_top_n(df, label_col, value_col, top_n=top_n)
     plot_df = plot_df.sort_values(value_col, ascending=True)
-
+    colors = make_color_sequence(len(plot_df))
     fig = px.bar(
         plot_df,
         x=value_col,
@@ -439,10 +852,9 @@ def draw_percent_bar_plotly(df, label_col, value_col, title, top_n=15):
         orientation="h",
         text=value_col,
         color=label_col,
-        color_discrete_sequence=make_color_sequence(len(plot_df)),
+        color_discrete_sequence=colors,
         title=title,
     )
-
     fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
     fig.update_layout(
         showlegend=False,
@@ -456,7 +868,7 @@ def draw_percent_bar_plotly(df, label_col, value_col, title, top_n=15):
 
 
 # =========================================================
-# 8. 앱 화면
+# 10. 앱 화면
 # =========================================================
 
 st.set_page_config(page_title="국민신문고 민원 분석 대시보드", layout="wide")
@@ -464,47 +876,50 @@ st.set_page_config(page_title="국민신문고 민원 분석 대시보드", layo
 st.title("국민신문고 민원·정책 질의응답 분석 대시보드")
 st.caption("Hadoop HDFS + PySpark + Spark MLlib 분석 결과를 활용한 민원 데이터 디스플레이 앱")
 
+if not DATA_PATH.exists():
+    st.error(f"앱 데이터 파일을 찾을 수 없습니다: {DATA_PATH}")
+    st.stop()
+
 df = load_data()
 model = train_model(df)
 
 
 # =========================================================
-# 9. 사이드바 필터
+# 11. 사이드바 필터
 # =========================================================
 
 st.sidebar.header("검색 조건")
 
-sido_options = ["전체"] + sorted(df["sido"].dropna().unique().tolist())
+sido_options = clean_filter_options(df["sido"].dropna().unique().tolist(), include_all=True)
 selected_sido = st.sidebar.selectbox("시도/기관 선택", sido_options)
 
 filtered = df.copy()
-
 if selected_sido != "전체":
     filtered = filtered[filtered["sido"] == selected_sido]
 
-sigungu_options = ["전체"] + sorted(filtered["sigungu"].dropna().unique().tolist())
+sigungu_options = clean_filter_options(filtered["sigungu"].dropna().unique().tolist(), include_all=True)
 selected_sigungu = st.sidebar.selectbox("시군구/세부기관 선택", sigungu_options)
-
 if selected_sigungu != "전체":
     filtered = filtered[filtered["sigungu"] == selected_sigungu]
 
-dept_options = ["전체"] + sorted(filtered["dept_name"].dropna().unique().tolist())
-selected_dept = st.sidebar.selectbox("담당부서 선택", dept_options)
-
+dept_options = clean_filter_options(filtered["dept_name"].dropna().unique().tolist(), include_all=True)
+selected_dept = st.sidebar.selectbox("부서 선택", dept_options)
 if selected_dept != "전체":
     filtered = filtered[filtered["dept_name"] == selected_dept]
 
-category_options = ["전체"] + sorted(df["category"].dropna().unique().tolist())
-selected_category = st.sidebar.selectbox("민원 분야 선택", category_options)
-
-if selected_category != "전체":
-    filtered = filtered[filtered["category"] == selected_category]
-
 st.sidebar.metric("선택 조건 데이터 수", f"{len(filtered):,}건")
+
+new_count = 0
+if NEW_COMPLAINT_PATH.exists():
+    try:
+        new_count = len(pd.read_csv(NEW_COMPLAINT_PATH))
+    except Exception:
+        new_count = 0
+st.sidebar.metric("신규 접수 누적 수", f"{new_count:,}건")
 
 
 # =========================================================
-# 10. 탭 구성
+# 12. 탭 구성
 # =========================================================
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -515,92 +930,78 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 
+# =========================================================
+# 탭 1. 지역·분야별 민원 추이
+# =========================================================
+
 with tab1:
     st.subheader("1. 지역·기관·분야별 민원 추이")
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("전체 데이터", f"{len(df):,}건")
     c2.metric("필터링 데이터", f"{len(filtered):,}건")
     c3.metric("분야 수", f"{filtered['category'].nunique():,}개")
+    c4.metric("신규 접수 누적", f"{new_count:,}건")
 
     left, right = st.columns(2)
 
     with left:
-        category_count = (
-            filtered.groupby("category")
-            .size()
-            .reset_index(name="count")
-            .sort_values("count", ascending=False)
-        )
-
+        category_count = filtered.groupby("category").size().reset_index(name="count").sort_values("count", ascending=False)
         if len(category_count) > 0:
             st.plotly_chart(
-                draw_barh_plotly(category_count, "category", "count", "선택 조건별 민원 분야 분포", "건수", 12),
+                draw_barh_plotly(category_count, "category", "count", "선택 조건별 민원 분야 분포", x_title="건수", top_n=12),
                 use_container_width=True,
             )
         else:
             st.info("선택 조건에 해당하는 데이터가 없습니다.")
 
     with right:
-        monthly = (
-            filtered.groupby("month")
-            .size()
-            .reset_index(name="count")
-            .sort_values("month")
-        )
-
+        monthly = filtered.groupby("month").size().reset_index(name="count").sort_values("month")
         if len(monthly) > 0:
-            st.plotly_chart(
-                draw_line_plotly(monthly, "month", "count", "월별 민원·정책 질의응답 추이"),
-                use_container_width=True,
-            )
+            st.plotly_chart(draw_line_plotly(monthly, "month", "count", "월별 민원·정책 질의응답 추이"), use_container_width=True)
         else:
             st.info("월별 추이를 표시할 데이터가 없습니다.")
 
     st.subheader("담당부서 Top 10")
+    dept_top = filtered.groupby("full_dept_name").size().reset_index(name="count").sort_values("count", ascending=False).head(10)
+    st.dataframe(dept_top.rename(columns={"full_dept_name": "기관/부서", "count": "건수"}), use_container_width=True)
 
-    dept_top = (
-        filtered.groupby("dept_name")
+    st.subheader("지역구·행정동·분야별 데이터")
+    location_summary = (
+        filtered.groupby(["sido", "sigungu", "dong", "category"], dropna=False)
         .size()
         .reset_index(name="count")
         .sort_values("count", ascending=False)
-        .head(10)
+        .head(30)
     )
+    st.dataframe(location_summary, use_container_width=True)
 
-    st.dataframe(dept_top, use_container_width=True)
 
+# =========================================================
+# 탭 2. 분야별 빈출 단어
+# =========================================================
 
 with tab2:
     st.subheader("2. 민원 분야별 빈출 단어 순위")
 
-    word_category = st.selectbox(
-        "빈출 단어를 확인할 분야 선택",
-        sorted(df["category"].dropna().unique().tolist())
-    )
-
+    word_category = st.selectbox("빈출 단어를 확인할 분야 선택", sorted(df["category"].dropna().unique().tolist()))
     word_df = df[df["category"] == word_category]
 
     common_words = get_common_words_by_category(df, min_category_count=4)
 
     all_words = []
     for text in word_df["complaint_text"]:
-        words = tokenize_text(text)
-        words = [word for word in words if word not in common_words]
+        words = [w for w in tokenize_text(text) if w not in common_words]
         all_words.extend(words)
 
-    word_counter = Counter(all_words)
-    word_count_df = pd.DataFrame(
-        word_counter.most_common(30),
-        columns=["word", "count"]
-    )
+    word_count_df = pd.DataFrame(Counter(all_words).most_common(30), columns=["word", "count"])
 
     left, right = st.columns([2, 1])
 
     with left:
         if len(word_count_df) > 0:
-            chart_df = word_count_df.head(20)
             st.plotly_chart(
-                draw_barh_plotly(chart_df, "word", "count", f"{word_category} 분야 빈출 단어 Top 20", "빈도", 20),
+                draw_barh_plotly(word_count_df.head(20), "word", "count", f"{word_category} 분야 빈출 단어 Top 20", x_title="빈도", top_n=20),
                 use_container_width=True,
             )
         else:
@@ -611,159 +1012,149 @@ with tab2:
         st.dataframe(word_count_df, use_container_width=True)
 
 
+# =========================================================
+# 탭 3. 신규 민원 분야 예측 및 실제 데이터 기반 부서 추천
+# =========================================================
+
 with tab3:
     st.subheader("3. 신규 민원 내용 기반 분야 예측 및 부서 전달")
+
+    user_location = st.text_input(
+        "지역구/행정동을 입력하세요",
+        placeholder="예: 인천 부평구 갈월동 45 또는 서울특별시 강서구 화곡동",
+    )
 
     user_text = st.text_area(
         "새로운 민원 내용을 입력하세요",
         height=180,
-        placeholder="예: 집 앞 도로에 불법주정차 차량이 많아 통행이 어렵고 사고 위험이 큽니다. 단속을 요청합니다."
+        placeholder="예: 집 앞 도로에 불법주정차 차량이 많아 통행이 어렵고 사고 위험이 큽니다. 단속을 요청합니다.",
     )
 
     if st.button("분야 예측하기"):
         if len(user_text.strip()) < 10:
             st.warning("민원 내용을 조금 더 길게 입력해 주세요.")
         else:
-            probs = model.predict_proba([user_text])[0]
-            classes = model.classes_
-
-            result_df = pd.DataFrame({
-                "category": classes,
-                "probability": probs
-            })
-
-            result_df["probability_percent"] = (result_df["probability"] * 100).round(2)
-            result_df = result_df.sort_values("probability_percent", ascending=False)
+            result_df = predict_category_with_keyword_weights(model, df, user_text)
 
             st.session_state["prediction_result"] = result_df
             st.session_state["user_text"] = user_text
+            st.session_state["user_location"] = user_location
 
     if "prediction_result" in st.session_state:
         result_df = st.session_state["prediction_result"]
         user_text = st.session_state["user_text"]
-
+        user_location = st.session_state.get("user_location", "")
         top = result_df.iloc[0]
-        top_category = top["category"]
 
-        st.success(f"가장 가능성이 높은 분야: {top_category} ({top['probability_percent']}%)")
+        if top["category"] == "기타" and float(top["probability_percent"]) >= 99.99:
+            loc = parse_location(user_location)
+            fallback_region = " ".join([part for part in [loc.get("sido"), loc.get("sigungu")] if part and part not in {"기타 기관", "전체"}])
+            if fallback_region:
+                st.warning(f"분류 불가능한 민원입니다. {fallback_region} 민원총괄과에 연락 부탁드립니다.")
+            else:
+                st.warning("분류 불가능한 민원입니다. 해당 지역구 민원총괄과에 연락 부탁드립니다.")
+        else:
+            st.success(f"가장 가능성이 높은 분야: {top['category']} ({top['probability_percent']}%)")
 
         st.dataframe(result_df[["category", "probability_percent"]], use_container_width=True)
 
-        prob_chart_df = result_df.head(8)
-
         st.plotly_chart(
-            draw_percent_bar_plotly(prob_chart_df, "category", "probability_percent", "신규 민원 분야 예측 확률", 8),
+            draw_percent_bar_plotly(result_df.head(8), "category", "probability_percent", "신규 민원 분야 예측 확률", top_n=8),
             use_container_width=True,
         )
 
         st.subheader("전달 분야 선택")
-
-        category_labels = [
-            f"{row['category']} | {row['probability_percent']}%"
-            for _, row in result_df.iterrows()
-        ]
-
+        category_labels = [f"{row['category']} | {row['probability_percent']}%" for _, row in result_df.iterrows()]
         selected_category_label = st.selectbox("전달할 민원 분야를 선택하세요", category_labels)
         selected_category = selected_category_label.split(" | ")[0]
-
-        selected_probability = result_df[
-            result_df["category"] == selected_category
-        ]["probability_percent"].iloc[0]
-
+        selected_probability = result_df[result_df["category"] == selected_category]["probability_percent"].iloc[0]
         st.info(f"선택한 전달 분야: {selected_category} ({selected_probability}%)")
 
-        st.subheader("추천 전달 부서")
-
-        dept_candidates = CATEGORY_DEPT_MAP.get(selected_category, CATEGORY_DEPT_MAP["기타"])
-
-        dept_labels = [
-            f"{item['dept']} | {item['email']}"
-            for item in dept_candidates
-        ]
-
-        selected_label = st.selectbox("전달할 부서를 선택하세요", dept_labels)
-
-        selected_info = next(
-            item for item in dept_candidates
-            if f"{item['dept']} | {item['email']}" == selected_label
+        st.subheader("실제 데이터 기반 추천 전달 부서")
+        loc = parse_location(user_location)
+        st.caption(
+            f"입력 지역 분석 결과: 시도={loc['sido']} / 시군구={loc['sigungu']} / 행정동={loc['dong'] or '미입력'}"
         )
 
-        st.info(
-            f"참고: 아래 이메일 주소는 가상의 이메일 주소입니다.\n\n"
-            f"{selected_info['email']}"
-        )
+        dept_candidates = recommend_departments_from_data(df, user_location, selected_category, max_items=10)
 
-        if st.button("해당 부서로 민원 전달하기"):
-            save_new_complaint(
-                user_text=user_text,
-                predicted_category=selected_category,
-                selected_dept=selected_info["dept"],
-                selected_email=selected_info["email"]
+        if not dept_candidates:
+            st.warning("입력 지역과 선택 분야에 맞는 실제 데이터 기반 부서를 찾지 못했습니다. 분야 전체 기준으로 다시 시도해 주세요.")
+        else:
+            dept_labels = []
+            for idx, item in enumerate(dept_candidates):
+                if item.get("is_representative_contact"):
+                    dept_labels.append(item["display_dept"])
+                else:
+                    dept_labels.append(f"{idx + 1}순위: {item['display_dept']}")
+            selected_label = st.selectbox("전달할 부서를 선택하세요", dept_labels)
+            selected_idx = dept_labels.index(selected_label)
+            selected_info = dept_candidates[selected_idx]
+
+            st.info(
+                f"추천 기관/부서: {selected_info['display_dept']}\n\n"
+                f"참고: 아래 이메일 주소는 가상의 이메일 주소입니다.\n\n"
+                f"{selected_info['email']}"
             )
 
-            st.cache_data.clear()
-            st.success(f"{selected_info['dept']}로 민원이 전달되었습니다!")
+            if st.button("해당 부서로 민원 전달하기"):
+                saved = save_new_complaint(
+                    user_text=user_text,
+                    user_location=user_location,
+                    predicted_category=selected_category,
+                    selected_agency=selected_info["agency"],
+                    selected_dept=selected_info["dept"],
+                    selected_full_dept=selected_info["full_dept"],
+                    selected_email=selected_info["email"],
+                )
+
+                load_data.clear()
+                get_common_words_by_category.clear()
+                st.session_state["last_forward_message"] = (
+                    f"{selected_info['display_dept']}로 민원이 전달되었습니다! "
+                    f"현재 신규 접수 누적 수가 1건 증가했습니다. "
+                    f"저장 분야: {saved['category']} / 지역: {saved['user_sido']} {saved['user_sigungu']} {saved['user_dong']}"
+                )
+                st.rerun()
+
+        if "last_forward_message" in st.session_state:
+            st.success(st.session_state["last_forward_message"])
             st.caption("참고: 표시된 이메일 주소는 실제 발송용 주소가 아니라 시연을 위한 가상의 이메일 주소입니다.")
             st.balloons()
 
-        st.caption("본 예측 결과는 민원 자동 배정이 아니라 담당자 검토를 돕기 위한 참고용 추천 결과입니다.")
+        st.caption("분야 예측은 기타를 제외한 주요 분야의 빈출 단어 가중치를 우선 반영하며, 기타는 다른 분야 관련 단어가 없을 때만 추천됩니다. 부서 추천은 실제 기존 데이터에 존재하는 기관/부서만 사용합니다.")
 
+
+# =========================================================
+# 탭 4. 지도 기반 지역 비율
+# =========================================================
 
 with tab4:
     st.subheader("4. 지도 기반 지역별 민원 비율 분석")
 
-    map_category = st.selectbox(
-        "지도에 표시할 민원 분야 선택",
-        sorted(df["category"].dropna().unique().tolist()),
-        key="map_category_select"
-    )
-
+    map_category = st.selectbox("지도에 표시할 민원 분야 선택", sorted(df["category"].dropna().unique().tolist()), key="map_category_select")
     map_df = df[df["category"] == map_category].copy()
 
-    sido_summary = (
-        map_df.groupby("sido")
-        .size()
-        .reset_index(name="count")
-        .sort_values("count", ascending=False)
-    )
-
+    sido_summary = map_df.groupby("sido").size().reset_index(name="count").sort_values("count", ascending=False)
     total_count = sido_summary["count"].sum()
 
     if total_count == 0:
         st.info("선택한 분야에 해당하는 데이터가 없습니다.")
     else:
         sido_summary["percent"] = (sido_summary["count"] / total_count * 100).round(2)
-
-        sido_summary["lat"] = sido_summary["sido"].map(
-            lambda x: SIDO_COORDS.get(x, {}).get("lat")
-        )
-        sido_summary["lon"] = sido_summary["sido"].map(
-            lambda x: SIDO_COORDS.get(x, {}).get("lon")
-        )
-
+        sido_summary["lat"] = sido_summary["sido"].map(lambda x: SIDO_COORDS.get(x, {}).get("lat"))
+        sido_summary["lon"] = sido_summary["sido"].map(lambda x: SIDO_COORDS.get(x, {}).get("lon"))
         map_ready = sido_summary.dropna(subset=["lat", "lon"]).copy()
 
         if len(map_ready) == 0:
             st.warning("선택한 분야의 데이터 중 지도 좌표를 매칭할 수 있는 시도 단위 데이터가 없습니다.")
         else:
             max_count = max(map_ready["count"].max(), 1)
-            map_ready["radius"] = (map_ready["count"] / max_count * 90000 + 20000)
-
-            map_ready["color_level"] = (
-                map_ready["percent"] / max(map_ready["percent"].max(), 1) * 255
-            ).astype(int)
-
-            map_ready["fill_color"] = map_ready["color_level"].apply(
-                lambda x: [255, max(70, 230 - x), 80, 170]
-            )
-
+            map_ready["radius"] = map_ready["count"] / max_count * 90000 + 20000
+            map_ready["color_level"] = (map_ready["percent"] / max(map_ready["percent"].max(), 1) * 255).astype(int)
+            map_ready["fill_color"] = map_ready["color_level"].apply(lambda x: [255, max(70, 230 - x), 80, 170])
             map_ready["tooltip"] = (
-                map_ready["sido"]
-                + "<br/>건수: "
-                + map_ready["count"].astype(str)
-                + "건<br/>비율: "
-                + map_ready["percent"].astype(str)
-                + "%"
+                map_ready["sido"] + "<br/>건수: " + map_ready["count"].astype(str) + "건<br/>비율: " + map_ready["percent"].astype(str) + "%"
             )
 
             st.write(f"선택 분야: **{map_category}**")
@@ -779,48 +1170,21 @@ with tab4:
                 pickable=True,
                 auto_highlight=True,
             )
-
-            view_state = pdk.ViewState(
-                latitude=36.3,
-                longitude=127.8,
-                zoom=6,
-                pitch=0,
-            )
-
+            view_state = pdk.ViewState(latitude=36.3, longitude=127.8, zoom=6, pitch=0)
             deck = pdk.Deck(
                 layers=[layer],
                 initial_view_state=view_state,
-                tooltip={
-                    "html": "{tooltip}",
-                    "style": {
-                        "backgroundColor": "white",
-                        "color": "black"
-                    }
-                }
+                tooltip={"html": "{tooltip}", "style": {"backgroundColor": "white", "color": "black"}},
             )
-
             st.pydeck_chart(deck, use_container_width=True)
 
         st.subheader("지역별 비율 표")
-
-        table_df = sido_summary[["sido", "count", "percent"]].rename(
-            columns={"sido": "지역", "count": "건수", "percent": "비율(%)"}
-        )
-
+        table_df = sido_summary[["sido", "count", "percent"]].rename(columns={"sido": "지역", "count": "건수", "percent": "비율(%)"})
         st.dataframe(table_df, use_container_width=True)
 
-        percent_chart_df = table_df.rename(
-            columns={"지역": "region", "비율(%)": "percent"}
-        )
-
+        percent_chart_df = table_df.rename(columns={"지역": "region", "비율(%)": "percent"})
         st.plotly_chart(
-            draw_percent_bar_plotly(
-                percent_chart_df,
-                "region",
-                "percent",
-                f"{map_category} 분야 지역별 비율",
-                top_n=15,
-            ),
+            draw_percent_bar_plotly(percent_chart_df, "region", "percent", f"{map_category} 분야 지역별 비율", top_n=15),
             use_container_width=True,
         )
 
