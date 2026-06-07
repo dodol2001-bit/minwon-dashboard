@@ -268,12 +268,13 @@ def parse_location(location_text):
     text = str(location_text).strip()
     sido = infer_sido_from_text(text)
     sigungu = extract_sigungu_by_sido(text, sido)
-    dong = extract_dong(text)
+    # 기존 원천 데이터가 대부분 시군구 단위까지만 제공되므로
+    # 신규 민원도 시도/시군구 단위까지만 저장·분석한다.
     return {
         "raw": text,
         "sido": sido,
         "sigungu": sigungu,
-        "dong": dong,
+        "dong": "",
     }
 
 
@@ -414,7 +415,7 @@ def load_data():
     text_cols = [
         "faqNo", "title", "question_text", "answer_text", "complaint_text",
         "category", "agency_name", "dept_name", "region", "month",
-        "user_location", "user_sido", "user_sigungu", "user_dong",
+        "user_location", "user_sido", "user_sigungu",
     ]
 
     for col in text_cols:
@@ -439,11 +440,10 @@ def load_data():
         [extract_sigungu_by_sido(text_value, sido_value) for text_value, sido_value in zip(df["region_source_text"], inferred_sido)],
         index=df.index,
     )
-    inferred_dong = df["user_location"].apply(extract_dong)
-
     df["sido"] = df["user_sido"].where(df["user_sido"].str.len() > 0, inferred_sido)
     df["sigungu"] = df["user_sigungu"].where(df["user_sigungu"].str.len() > 0, inferred_sigungu)
-    df["dong"] = df["user_dong"].where(df["user_dong"].str.len() > 0, inferred_dong)
+    # 원천 데이터와 신규 민원 모두 시군구 단위까지만 사용한다.
+    df["dong"] = ""
 
     df.loc[df["sido"] == "", "sido"] = "기타 기관"
     df.loc[df["sigungu"] == "", "sigungu"] = "전체"
@@ -637,7 +637,6 @@ def save_reinforcement_feedback(
         "user_location": user_location,
         "user_sido": loc["sido"],
         "user_sigungu": loc["sigungu"],
-        "user_dong": loc["dong"],
         "predicted_top_category": top_row["category"],
         "predicted_top_probability": float(top_row["probability_percent"]),
         "selected_category": selected_category,
@@ -754,17 +753,14 @@ def predict_category_with_keyword_weights(model, df, user_text):
 
 def build_local_representative_contact(user_location):
     """추천할 실제 지역 부서가 없을 때 사용할 대표연락처 후보를 만든다.
-    주소의 번지수는 제외하고 시도/시군구/행정동까지만 사용한다.
-    선택창에는 '대표 연락처 : 서울특별시 강서구 마곡동 행정복지센터' 형식으로 표시한다.
+    원천 데이터 기준에 맞춰 시도/시군구 단위까지만 사용한다.
+    선택창에는 '대표 연락처 : 서울특별시 강서구청' 형식으로 표시한다.
     """
     loc = parse_location(user_location)
     sido = loc.get("sido", "기타 기관")
     sigungu = loc.get("sigungu", "전체")
-    dong = loc.get("dong", "")
 
-    if sido != "기타 기관" and sigungu != "전체" and dong:
-        agency_name = f"{sido} {sigungu} {dong} 행정복지센터"
-    elif sido != "기타 기관" and sigungu != "전체":
+    if sido != "기타 기관" and sigungu != "전체":
         agency_name = f"{sido} {sigungu}청"
     elif sido != "기타 기관":
         agency_name = f"{sido}청"
@@ -953,7 +949,6 @@ def save_new_complaint(user_text, user_location, predicted_category, selected_ag
         "user_location": user_location,
         "user_sido": loc["sido"],
         "user_sigungu": loc["sigungu"],
-        "user_dong": loc["dong"],
         "forward_email": selected_email,
         "predicted_top_category": predicted_top_category,
         "selected_rank": selected_rank,
@@ -1213,9 +1208,9 @@ with tab1:
     dept_top = filtered.groupby("full_dept_name").size().reset_index(name="count").sort_values("count", ascending=False).head(10)
     st.dataframe(dept_top.rename(columns={"full_dept_name": "기관/부서", "count": "건수"}), use_container_width=True)
 
-    st.subheader("지역구·행정동·분야별 데이터")
+    st.subheader("시군구·분야별 데이터")
     location_summary = (
-        filtered.groupby(["sido", "sigungu", "dong", "category"], dropna=False)
+        filtered.groupby(["sido", "sigungu", "category"], dropna=False)
         .size()
         .reset_index(name="count")
         .sort_values("count", ascending=False)
@@ -1267,8 +1262,8 @@ with tab3:
     st.subheader("1. 신규 민원 내용 기반 분야 예측 및 부서 전달")
 
     user_location = st.text_input(
-        "지역구/행정동을 입력하세요",
-        placeholder="예: 서울특별시 강서구 마곡동 또는 대전광역시 유성구",
+        "시도/시군구를 입력하세요",
+        placeholder="예: 서울특별시 강서구 또는 대전광역시 유성구",
     )
 
     user_title = st.text_input(
@@ -1385,7 +1380,7 @@ with tab3:
         st.subheader("실제 데이터 기반 추천 전달 부서")
         loc = parse_location(user_location)
         st.caption(
-            f"입력 지역 분석 결과: 시도={loc['sido']} / 시군구={loc['sigungu']} / 행정동={loc['dong'] or '미입력'}"
+            f"입력 지역 분석 결과: 시도={loc['sido']} / 시군구={loc['sigungu']}"
         )
 
         dept_candidates = recommend_departments_from_data(df, user_location, selected_category, max_items=10)
@@ -1446,7 +1441,7 @@ with tab3:
                 st.session_state["last_forward_message"] = (
                     f"{selected_info['display_dept']}로 민원이 전달되었습니다! "
                     f"현재 신규 접수 누적 수가 1건 증가했습니다. "
-                    f"저장 분야: {saved['category']} / 지역: {saved['user_sido']} {saved['user_sigungu']} {saved['user_dong']} "
+                    f"저장 분야: {saved['category']} / 지역: {saved['user_sido']} {saved['user_sigungu']} "
                     f"/ 피드백 보상: {feedback_reward_label}"
                 )
                 st.rerun()
@@ -1571,8 +1566,8 @@ with tab5:
     if list_category != "전체":
         list_df = list_df[list_df["category"] == list_category]
 
-    st.markdown("**지역·행정동·부서 필터**")
-    region_col1, region_col2, region_col3, region_col4 = st.columns(4)
+    st.markdown("**지역·부서 필터**")
+    region_col1, region_col2, region_col3 = st.columns(3)
 
     with region_col1:
         list_sido_options = clean_filter_options(list_df["sido"].dropna().astype(str).unique().tolist(), include_all=True)
@@ -1597,17 +1592,6 @@ with tab5:
         list_df = list_df[list_df["sigungu"] == list_sigungu]
 
     with region_col3:
-        list_dong_options = clean_filter_options(list_df["dong"].dropna().astype(str).unique().tolist(), include_all=True)
-        list_dong = st.selectbox(
-            "행정동",
-            list_dong_options,
-            key="complaint_list_dong"
-        )
-
-    if list_dong != "전체":
-        list_df = list_df[list_df["dong"] == list_dong]
-
-    with region_col4:
         list_dept_options = clean_filter_options(list_df["dept_name"].dropna().astype(str).unique().tolist(), include_all=True)
         list_dept = st.selectbox(
             "부서",
@@ -1623,7 +1607,7 @@ with tab5:
         search_cols = [
             "title", "question_text", "answer_text", "complaint_text",
             "agency_name", "dept_name", "full_dept_name", "display_dept_name",
-            "sido", "sigungu", "dong"
+            "sido", "sigungu"
         ]
         search_text = list_df[search_cols].fillna("").astype(str).agg(" ".join, axis=1)
         list_df = list_df[search_text.str.contains(keyword, case=False, na=False)]
@@ -1635,18 +1619,32 @@ with tab5:
     if len(list_df) == 0:
         st.info("조건에 해당하는 민원이 없습니다.")
     else:
-        preview_rows = list_df.head(50).copy()
+        page_size = 15
+        total_pages = max(1, (len(list_df) + page_size - 1) // page_size)
+
+        if "complaint_list_page" not in st.session_state:
+            st.session_state["complaint_list_page"] = 1
+        if st.session_state["complaint_list_page"] > total_pages:
+            st.session_state["complaint_list_page"] = total_pages
+        if st.session_state["complaint_list_page"] < 1:
+            st.session_state["complaint_list_page"] = 1
+
+        page = st.session_state["complaint_list_page"]
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+
+        preview_rows = list_df.iloc[start_idx:end_idx].copy()
         preview_rows["reg_date_text"] = pd.to_datetime(preview_rows["reg_date"], errors="coerce").dt.strftime("%Y-%m-%d")
 
-        st.caption("조회 결과는 최근순 최대 50건까지 표시됩니다. 첫 번째 열의 선택 버튼을 누르면 아래에서 상세 내용을 확인할 수 있습니다.")
+        st.caption(f"조회 결과는 한 페이지당 {page_size}건씩 표시됩니다. 현재 {page}/{total_pages}페이지입니다. 첫 번째 열의 선택 버튼을 누르면 아래에서 상세 내용을 확인할 수 있습니다.")
 
-        header_cols = st.columns([0.7, 1.0, 1.0, 1.0, 3.5, 2.8, 2.8, 1.2, 1.2, 1.2])
-        headers = ["선택", "구분", "등록일", "분야", "제목", "처리기관", "처리부서", "시도", "시군구", "행정동"]
+        header_cols = st.columns([0.7, 1.0, 1.0, 1.0, 3.8, 3.0, 3.0, 1.3, 1.3])
+        headers = ["선택", "구분", "등록일", "분야", "제목", "처리기관", "처리부서", "시도", "시군구"]
         for col, header in zip(header_cols, headers):
             col.markdown(f"**{header}**")
 
         for row_idx, row in preview_rows.iterrows():
-            row_cols = st.columns([0.7, 1.0, 1.0, 1.0, 3.5, 2.8, 2.8, 1.2, 1.2, 1.2])
+            row_cols = st.columns([0.7, 1.0, 1.0, 1.0, 3.8, 3.0, 3.0, 1.3, 1.3])
             faq_no = str(row.get("faqNo", row_idx))
             button_key = f"complaint_select_btn_{faq_no}_{row_idx}"
 
@@ -1661,7 +1659,18 @@ with tab5:
             row_cols[6].write(shorten_text(row.get("dept_name", ""), 40))
             row_cols[7].write(safe_display_value(row.get("sido")))
             row_cols[8].write(safe_display_value(row.get("sigungu")))
-            row_cols[9].write(safe_display_value(row.get("dong")))
+
+        nav_prev, nav_info, nav_next = st.columns([1, 2, 1])
+        with nav_prev:
+            if st.button("이전 페이지", disabled=(page <= 1), key="complaint_prev_page"):
+                st.session_state["complaint_list_page"] = max(1, page - 1)
+                st.rerun()
+        with nav_info:
+            st.markdown(f"<div style='text-align:center'>페이지 {page} / {total_pages}</div>", unsafe_allow_html=True)
+        with nav_next:
+            if st.button("다음 페이지", disabled=(page >= total_pages), key="complaint_next_page"):
+                st.session_state["complaint_list_page"] = min(total_pages, page + 1)
+                st.rerun()
 
         selected_faq_no = st.session_state.get("selected_complaint_faq_no")
         if selected_faq_no and selected_faq_no in set(list_df["faqNo"].astype(str)):
@@ -1692,9 +1701,6 @@ with tab5:
 
             st.markdown("**처리 기관/부서**")
             st.info(processed_full_name)
-
-            if safe_display_value(selected_row.get("dong", ""), default=""):
-                st.caption(f"행정동: {safe_display_value(selected_row.get('dong'))}")
 
             st.markdown("**제목**")
             st.write(safe_display_value(selected_row.get("title"), default="제목 없음"))
