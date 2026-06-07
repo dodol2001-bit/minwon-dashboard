@@ -21,6 +21,7 @@ from sklearn.linear_model import LogisticRegression
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_PATH = BASE_DIR / "output" / "tables" / "app_data.csv"
 NEW_COMPLAINT_PATH = BASE_DIR / "output" / "tables" / "new_complaints.csv"
+FEEDBACK_PATH = BASE_DIR / "output" / "tables" / "reinforcement_feedback.csv"
 
 
 # =========================================================
@@ -321,30 +322,82 @@ def clean_display_dept_name(agency_name, dept_name):
     return full_name
 
 
+def is_valid_token(word):
+    """빈출어/가중치 계산에 사용할 수 있는 토큰인지 검사한다."""
+    word = str(word).strip()
+
+    if len(word) < 2:
+        return False
+    if word in STOPWORDS:
+        return False
+    if word.isdigit():
+        return False
+    if word.endswith(GENERIC_SUFFIXES):
+        return False
+    if "귀하" in word or "연락" in word:
+        return False
+    if "문의" in word and len(word) <= 8:
+        return False
+    if "답변" in word and len(word) <= 8:
+        return False
+    if "확인" in word and len(word) <= 8:
+        return False
+    if "안내" in word and len(word) <= 8:
+        return False
+
+    return True
+
+
+def expand_compound_tokens(word):
+    """
+    한국어 합성어를 데이터 기반 가중치에 더 잘 반영하기 위한 보조 토큰 생성 함수.
+
+    예시:
+    - 학교폭력 → 학교폭력, 학교, 폭력, 학교폭, 교폭력 등
+    - 쓰레기통 → 쓰레기통, 쓰레기, 쓰레, 기통 등
+
+    별도의 수동 분야 키워드 사전을 쓰지 않고, 원문에 등장한 합성어에서
+    2~4글자 부분 토큰을 함께 만들어 학습/예측 양쪽에 동일하게 반영한다.
+    """
+    word = str(word).strip()
+
+    if not re.fullmatch(r"[가-힣]+", word):
+        return [word]
+
+    tokens = [word]
+
+    # 너무 짧은 단어는 그대로만 사용한다.
+    if len(word) < 4:
+        return tokens
+
+    # 2~4글자 연속 부분 토큰을 추가한다.
+    # 이렇게 하면 학교폭력에서 학교/폭력, 쓰레기통에서 쓰레기 같은 단어가 함께 잡힌다.
+    max_n = min(4, len(word) - 1)
+    for n in range(2, max_n + 1):
+        for start in range(0, len(word) - n + 1):
+            sub = word[start:start + n]
+            if is_valid_token(sub):
+                tokens.append(sub)
+
+    # 중복 제거, 순서 유지
+    return list(dict.fromkeys(tokens))
+
+
 def tokenize_text(text):
     words = re.findall(r"[가-힣a-zA-Z0-9]{2,}", str(text))
     cleaned = []
+
     for word in words:
         word = word.strip()
-        if len(word) < 2:
+
+        if not is_valid_token(word):
             continue
-        if word in STOPWORDS:
-            continue
-        if word.isdigit():
-            continue
-        if word.endswith(GENERIC_SUFFIXES):
-            continue
-        if "귀하" in word or "연락" in word:
-            continue
-        if "문의" in word and len(word) <= 8:
-            continue
-        if "답변" in word and len(word) <= 8:
-            continue
-        if "확인" in word and len(word) <= 8:
-            continue
-        if "안내" in word and len(word) <= 8:
-            continue
-        cleaned.append(word)
+
+        # 원래 토큰 + 합성어 부분 토큰을 같이 추가한다.
+        for token in expand_compound_tokens(word):
+            if is_valid_token(token):
+                cleaned.append(token)
+
     return cleaned
 
 
@@ -435,7 +488,7 @@ def train_model(df):
 
 
 @st.cache_data
-def get_common_words_by_category(df, min_category_count=4):
+def get_common_words_by_category(df, min_category_count=3):
     word_category_count = {}
     for category, group in df.groupby("category"):
         category_words = set()
@@ -457,7 +510,7 @@ def build_category_keyword_weights(df, top_n=250):
     수동 키워드 사전은 사용하지 않고, API 원천 데이터에서 전처리·토큰화된 단어 빈도만 사용한다.
     여러 분야에 공통으로 많이 등장하는 단어는 대표성이 낮으므로 제외한다.
     """
-    common_words = get_common_words_by_category(df, min_category_count=4)
+    common_words = get_common_words_by_category(df, min_category_count=3)
     weights = {}
     valid_categories = [
         c for c in sorted(df["category"].dropna().unique().tolist())
@@ -485,12 +538,133 @@ def build_category_keyword_weights(df, top_n=250):
     return weights
 
 
+
+
+def calculate_reward_score(selected_rank):
+    """추천 순위에 따른 보상 점수.
+    사용자가 1순위를 선택하면 추천이 맞았다고 보고 큰 보상을 주고,
+    하위 순위를 선택할수록 낮은 보상을 준다.
+    """
+    try:
+        rank = int(selected_rank)
+    except Exception:
+        return 0.3
+
+    if rank <= 1:
+        return 1.0
+    if rank == 2:
+        return 0.7
+    if rank == 3:
+        return 0.5
+    return 0.3
+
+
+@st.cache_data
+def build_feedback_keyword_weights():
+    """사용자가 최종 선택한 분야를 보상 신호로 저장한 뒤,
+    그 선택 데이터에서 토큰별 보상 가중치를 만든다.
+
+    원천 API 기반 가중치를 대체하지 않고 보조 가중치로만 사용한다.
+    """
+    if not FEEDBACK_PATH.exists():
+        return {}
+
+    try:
+        feedback_df = pd.read_csv(FEEDBACK_PATH)
+    except Exception:
+        return {}
+
+    required_cols = {"selected_category", "complaint_text", "reward_score"}
+    if not required_cols.issubset(set(feedback_df.columns)):
+        return {}
+
+    feedback_weights = {}
+
+    for _, row in feedback_df.iterrows():
+        category = str(row.get("selected_category", "")).strip()
+        text = str(row.get("complaint_text", ""))
+        try:
+            reward = float(row.get("reward_score", 0.0))
+        except Exception:
+            reward = 0.0
+
+        if not category or category == "기타" or reward <= 0:
+            continue
+
+        feedback_weights.setdefault(category, Counter())
+        for word in tokenize_text(text):
+            feedback_weights[category][word] += reward
+
+    normalized = {}
+    for category, counter in feedback_weights.items():
+        if not counter:
+            continue
+        max_score = max(counter.values())
+        if max_score <= 0:
+            continue
+        normalized[category] = {
+            word: score / max_score
+            for word, score in counter.items()
+        }
+
+    return normalized
+
+
+def save_reinforcement_feedback(
+    user_text,
+    user_location,
+    result_df,
+    selected_category,
+    selected_rank,
+    selected_probability,
+    selected_agency,
+    selected_dept,
+    selected_full_dept,
+    selected_email,
+):
+    """사용자 선택 결과를 보상/피드백 데이터로 누적 저장한다."""
+    FEEDBACK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    loc = parse_location(user_location)
+
+    top_row = result_df.iloc[0]
+    reward_score = calculate_reward_score(selected_rank)
+
+    feedback_row = pd.DataFrame([{
+        "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "complaint_id": f"FB_{now.strftime('%Y%m%d%H%M%S')}",
+        "complaint_text": user_text,
+        "user_location": user_location,
+        "user_sido": loc["sido"],
+        "user_sigungu": loc["sigungu"],
+        "user_dong": loc["dong"],
+        "predicted_top_category": top_row["category"],
+        "predicted_top_probability": float(top_row["probability_percent"]),
+        "selected_category": selected_category,
+        "selected_probability": float(selected_probability),
+        "selected_rank": int(selected_rank),
+        "reward_score": reward_score,
+        "selected_agency": selected_agency,
+        "selected_dept": selected_dept,
+        "selected_full_dept": selected_full_dept,
+        "selected_email": selected_email,
+        "is_top_choice": bool(int(selected_rank) == 1),
+    }])
+
+    if FEEDBACK_PATH.exists():
+        old_df = pd.read_csv(FEEDBACK_PATH)
+        feedback_row = pd.concat([old_df, feedback_row], ignore_index=True)
+
+    feedback_row.to_csv(FEEDBACK_PATH, index=False, encoding="utf-8-sig")
+    return feedback_row.iloc[-1].to_dict()
+
 def predict_category_with_keyword_weights(model, df, user_text):
     """API 데이터에서 추출한 분야별 토큰 가중치로 신규 민원 분야를 확률화한다.
     기타를 제외한 분야 중 토큰 가중치가 0보다 큰 분야가 하나라도 있으면 해당 분야들을 우선 추천하고,
     모든 분야의 데이터 기반 토큰 가중치가 0일 때만 기타 100%로 처리한다.
     """
     keyword_weights = build_category_keyword_weights(df)
+    feedback_weights = build_feedback_keyword_weights()
     words = tokenize_text(user_text)
     normalized_text = normalize_text(user_text)
 
@@ -509,6 +683,21 @@ def predict_category_with_keyword_weights(model, df, user_text):
         for keyword, weight in weights.items():
             if keyword and normalize_text(keyword) in normalized_text:
                 score += float(weight)
+
+        # 3) 사용자 피드백 보상 가중치 반영
+        # 사용자가 이전에 선택한 분야/부서를 보상 데이터로 저장하고,
+        # 같은 유형의 토큰이 다시 들어오면 해당 분야 점수를 보조적으로 올린다.
+        feedback_score = 0.0
+        category_feedback = feedback_weights.get(category, {})
+        if category_feedback:
+            for word in words:
+                feedback_score += category_feedback.get(word, 0.0)
+            for keyword, weight in category_feedback.items():
+                if keyword and normalize_text(keyword) in normalized_text:
+                    feedback_score += float(weight)
+
+        # API 원천 데이터 기반 가중치를 우선하고, 피드백 보상은 보조 가중치로만 반영한다.
+        score += feedback_score * 0.35
 
         # 아주 약한 단어도 0보다 크면 분야 후보로 인정한다.
         keyword_scores[category] = score
@@ -740,7 +929,7 @@ def recommend_departments_from_data(df, user_location, selected_category, max_it
 # =========================================================
 
 
-def save_new_complaint(user_text, user_location, predicted_category, selected_agency, selected_dept, selected_full_dept, selected_email):
+def save_new_complaint(user_text, user_location, predicted_category, selected_agency, selected_dept, selected_full_dept, selected_email, predicted_top_category="", selected_rank=0, reward_score=0.0):
     NEW_COMPLAINT_PATH.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
     loc = parse_location(user_location)
@@ -764,6 +953,9 @@ def save_new_complaint(user_text, user_location, predicted_category, selected_ag
         "user_sigungu": loc["sigungu"],
         "user_dong": loc["dong"],
         "forward_email": selected_email,
+        "predicted_top_category": predicted_top_category,
+        "selected_rank": selected_rank,
+        "reward_score": reward_score,
     }])
 
     if NEW_COMPLAINT_PATH.exists():
@@ -917,6 +1109,14 @@ if NEW_COMPLAINT_PATH.exists():
         new_count = 0
 st.sidebar.metric("신규 접수 누적 수", f"{new_count:,}건")
 
+feedback_count = 0
+if FEEDBACK_PATH.exists():
+    try:
+        feedback_count = len(pd.read_csv(FEEDBACK_PATH))
+    except Exception:
+        feedback_count = 0
+st.sidebar.metric("피드백 보상 누적", f"{feedback_count:,}건")
+
 
 # =========================================================
 # 12. 탭 구성
@@ -987,7 +1187,7 @@ with tab2:
     word_category = st.selectbox("빈출 단어를 확인할 분야 선택", sorted(df["category"].dropna().unique().tolist()))
     word_df = df[df["category"] == word_category]
 
-    common_words = get_common_words_by_category(df, min_category_count=4)
+    common_words = get_common_words_by_category(df, min_category_count=3)
 
     all_words = []
     for text in word_df["complaint_text"]:
@@ -1068,7 +1268,13 @@ with tab3:
         selected_category_label = st.selectbox("전달할 민원 분야를 선택하세요", category_labels)
         selected_category = selected_category_label.split(" | ")[0]
         selected_probability = result_df[result_df["category"] == selected_category]["probability_percent"].iloc[0]
-        st.info(f"선택한 전달 분야: {selected_category} ({selected_probability}%)")
+        selected_rank = int(result_df.reset_index(drop=True).index[result_df.reset_index(drop=True)["category"] == selected_category][0]) + 1
+        reward_score = calculate_reward_score(selected_rank)
+
+        st.info(
+            f"선택한 전달 분야: {selected_category} ({selected_probability}%)\n\n"
+            f"피드백 보상 점수: {reward_score}점 / 선택 순위: {selected_rank}순위"
+        )
 
         st.subheader("실제 데이터 기반 추천 전달 부서")
         loc = parse_location(user_location)
@@ -1106,14 +1312,34 @@ with tab3:
                     selected_dept=selected_info["dept"],
                     selected_full_dept=selected_info["full_dept"],
                     selected_email=selected_info["email"],
+                    predicted_top_category=str(result_df.iloc[0]["category"]),
+                    selected_rank=selected_rank,
+                    reward_score=reward_score,
+                )
+
+                feedback = save_reinforcement_feedback(
+                    user_text=user_text,
+                    user_location=user_location,
+                    result_df=result_df,
+                    selected_category=selected_category,
+                    selected_rank=selected_rank,
+                    selected_probability=selected_probability,
+                    selected_agency=selected_info["agency"],
+                    selected_dept=selected_info["dept"],
+                    selected_full_dept=selected_info["full_dept"],
+                    selected_email=selected_info["email"],
                 )
 
                 load_data.clear()
+                train_model.clear()
                 get_common_words_by_category.clear()
+                build_category_keyword_weights.clear()
+                build_feedback_keyword_weights.clear()
                 st.session_state["last_forward_message"] = (
                     f"{selected_info['display_dept']}로 민원이 전달되었습니다! "
                     f"현재 신규 접수 누적 수가 1건 증가했습니다. "
-                    f"저장 분야: {saved['category']} / 지역: {saved['user_sido']} {saved['user_sigungu']} {saved['user_dong']}"
+                    f"저장 분야: {saved['category']} / 지역: {saved['user_sido']} {saved['user_sigungu']} {saved['user_dong']} "
+                    f"/ 피드백 보상: {feedback['reward_score']}점"
                 )
                 st.rerun()
 
@@ -1122,7 +1348,7 @@ with tab3:
             st.caption("참고: 표시된 이메일 주소는 실제 발송용 주소가 아니라 시연을 위한 가상의 이메일 주소입니다.")
             st.balloons()
 
-        st.caption("분야 예측은 기타를 제외한 주요 분야의 빈출 단어 가중치를 우선 반영하며, 기타는 다른 분야 관련 단어가 없을 때만 추천됩니다. 부서 추천은 실제 기존 데이터에 존재하는 기관/부서만 사용합니다.")
+        st.caption("분야 예측은 API 데이터에서 추출한 토큰 가중치를 우선 반영하며, 사용자가 선택한 분야/부서는 보상 피드백으로 저장되어 이후 예측 가중치에 보조 반영됩니다. 기타는 다른 분야 관련 단어가 없을 때만 추천됩니다. 부서 추천은 실제 기존 데이터에 존재하는 기관/부서만 사용합니다.")
 
 
 # =========================================================
