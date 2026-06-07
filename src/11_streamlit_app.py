@@ -929,14 +929,16 @@ def recommend_departments_from_data(df, user_location, selected_category, max_it
 # =========================================================
 
 
-def save_new_complaint(user_text, user_location, predicted_category, selected_agency, selected_dept, selected_full_dept, selected_email, predicted_top_category="", selected_rank=0, reward_score=0.0):
+def save_new_complaint(user_text, user_location, predicted_category, selected_agency, selected_dept, selected_full_dept, selected_email, predicted_top_category="", selected_rank=0, reward_score=0.0, user_title=""):
     NEW_COMPLAINT_PATH.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now()
     loc = parse_location(user_location)
 
+    title_text = str(user_title).strip() if str(user_title).strip() else user_text[:40]
+
     new_row = pd.DataFrame([{
         "faqNo": f"USER_{now.strftime('%Y%m%d%H%M%S')}",
-        "title": user_text[:40],
+        "title": title_text,
         "question_text": user_text,
         "answer_text": "",
         "complaint_text": user_text,
@@ -1139,21 +1141,21 @@ if FEEDBACK_PATH.exists():
 # 12. 탭 구성
 # =========================================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "지역·분야별 민원 추이",
-    "분야별 빈출 단어",
+tab3, tab5, tab1, tab4, tab2 = st.tabs([
     "신규 민원 분야 예측",
-    "지도 기반 지역 비율",
     "기존·신규 민원 목록",
+    "지역·분야별 민원 추이",
+    "지도 기반 지역 비율",
+    "분야별 빈출 단어",
 ])
 
 
 # =========================================================
-# 탭 1. 지역·분야별 민원 추이
+# 탭 3. 지역·분야별 민원 추이
 # =========================================================
 
 with tab1:
-    st.subheader("1. 지역·기관·분야별 민원 추이")
+    st.subheader("3. 지역·기관·분야별 민원 추이")
 
     st.markdown("#### 검색 조건")
     filter_col1, filter_col2, filter_col3 = st.columns(3)
@@ -1223,11 +1225,11 @@ with tab1:
 
 
 # =========================================================
-# 탭 2. 분야별 빈출 단어
+# 탭 5. 분야별 빈출 단어
 # =========================================================
 
 with tab2:
-    st.subheader("2. 민원 분야별 빈출 단어 순위")
+    st.subheader("5. 민원 분야별 빈출 단어 순위")
 
     word_category = st.selectbox("빈출 단어를 확인할 분야 선택", sorted(df["category"].dropna().unique().tolist()))
     word_df = df[df["category"] == word_category]
@@ -1258,15 +1260,20 @@ with tab2:
 
 
 # =========================================================
-# 탭 3. 신규 민원 분야 예측 및 실제 데이터 기반 부서 추천
+# 탭 1. 신규 민원 분야 예측 및 실제 데이터 기반 부서 추천
 # =========================================================
 
 with tab3:
-    st.subheader("3. 신규 민원 내용 기반 분야 예측 및 부서 전달")
+    st.subheader("1. 신규 민원 내용 기반 분야 예측 및 부서 전달")
 
     user_location = st.text_input(
         "지역구/행정동을 입력하세요",
-        placeholder="예: 인천 부평구 갈월동 45 또는 서울특별시 강서구 화곡동",
+        placeholder="예: 서울특별시 강서구 마곡동 또는 대전광역시 유성구",
+    )
+
+    user_title = st.text_input(
+        "신규 민원 제목을 입력하세요",
+        placeholder="예: 쓰레기 배출구역 위치 문의",
     )
 
     user_text = st.text_area(
@@ -1279,15 +1286,20 @@ with tab3:
         if len(user_text.strip()) < 10:
             st.warning("민원 내용을 조금 더 길게 입력해 주세요.")
         else:
-            result_df = predict_category_with_keyword_weights(model, df, user_text)
+            prediction_text = f"{user_title} {user_text}".strip()
+            result_df = predict_category_with_keyword_weights(model, df, prediction_text)
 
             st.session_state["prediction_result"] = result_df
+            st.session_state["user_title"] = user_title
             st.session_state["user_text"] = user_text
+            st.session_state["prediction_text"] = prediction_text
             st.session_state["user_location"] = user_location
 
     if "prediction_result" in st.session_state:
         result_df = st.session_state["prediction_result"]
+        user_title = st.session_state.get("user_title", "")
         user_text = st.session_state["user_text"]
+        prediction_text = st.session_state.get("prediction_text", f"{user_title} {user_text}".strip())
         user_location = st.session_state.get("user_location", "")
         top = result_df.iloc[0]
 
@@ -1409,10 +1421,11 @@ with tab3:
                     predicted_top_category=str(result_df.iloc[0]["category"]),
                     selected_rank=selected_rank,
                     reward_score=reward_score,
+                    user_title=user_title,
                 )
 
                 feedback = save_reinforcement_feedback(
-                    user_text=user_text,
+                    user_text=prediction_text,
                     user_location=user_location,
                     result_df=result_df,
                     selected_category=selected_category,
@@ -1515,11 +1528,11 @@ with tab4:
 
 
 # =========================================================
-# 탭 5. 기존·신규 민원 목록
+# 탭 2. 기존·신규 민원 목록
 # =========================================================
 
 with tab5:
-    st.subheader("5. 기존 및 신규 민원 목록")
+    st.subheader("2. 기존 및 신규 민원 목록")
     st.caption("기존 국민신문고 민원과 앱에서 새로 접수한 신규 민원을 함께 조회합니다.")
 
     list_df = df.copy().reset_index(drop=True)
@@ -1622,69 +1635,78 @@ with tab5:
     if len(list_df) == 0:
         st.info("조건에 해당하는 민원이 없습니다.")
     else:
-        preview_df = list_df[[
-            "source_type", "reg_date", "category", "title", "agency_name", "dept_name", "sido", "sigungu", "dong"
-        ]].head(50).copy()
-        preview_df["reg_date"] = pd.to_datetime(preview_df["reg_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        preview_df = preview_df.rename(columns={
-            "source_type": "구분",
-            "reg_date": "등록일",
-            "category": "분야",
-            "title": "제목",
-            "agency_name": "처리기관",
-            "dept_name": "처리부서",
-            "sido": "시도",
-            "sigungu": "시군구",
-            "dong": "행정동",
-        })
-        st.dataframe(preview_df, use_container_width=True)
+        preview_rows = list_df.head(50).copy()
+        preview_rows["reg_date_text"] = pd.to_datetime(preview_rows["reg_date"], errors="coerce").dt.strftime("%Y-%m-%d")
 
-        list_df["_select_label"] = list_df.apply(build_complaint_list_label, axis=1)
-        selected_label = st.selectbox(
-            "상세 확인할 민원을 선택하세요",
-            list_df["_select_label"].tolist(),
-            key="complaint_detail_select"
-        )
+        st.caption("조회 결과는 최근순 최대 50건까지 표시됩니다. 첫 번째 열의 선택 버튼을 누르면 아래에서 상세 내용을 확인할 수 있습니다.")
 
-        selected_row = list_df[list_df["_select_label"] == selected_label].iloc[0]
+        header_cols = st.columns([0.7, 1.0, 1.0, 1.0, 3.5, 2.8, 2.8, 1.2, 1.2, 1.2])
+        headers = ["선택", "구분", "등록일", "분야", "제목", "처리기관", "처리부서", "시도", "시군구", "행정동"]
+        for col, header in zip(header_cols, headers):
+            col.markdown(f"**{header}**")
+
+        for row_idx, row in preview_rows.iterrows():
+            row_cols = st.columns([0.7, 1.0, 1.0, 1.0, 3.5, 2.8, 2.8, 1.2, 1.2, 1.2])
+            faq_no = str(row.get("faqNo", row_idx))
+            button_key = f"complaint_select_btn_{faq_no}_{row_idx}"
+
+            if row_cols[0].button("선택", key=button_key):
+                st.session_state["selected_complaint_faq_no"] = faq_no
+
+            row_cols[1].write(safe_display_value(row.get("source_type")))
+            row_cols[2].write(safe_display_value(row.get("reg_date_text")))
+            row_cols[3].write(safe_display_value(row.get("category")))
+            row_cols[4].write(shorten_text(row.get("title", ""), 45))
+            row_cols[5].write(shorten_text(row.get("agency_name", ""), 40))
+            row_cols[6].write(shorten_text(row.get("dept_name", ""), 40))
+            row_cols[7].write(safe_display_value(row.get("sido")))
+            row_cols[8].write(safe_display_value(row.get("sigungu")))
+            row_cols[9].write(safe_display_value(row.get("dong")))
+
+        selected_faq_no = st.session_state.get("selected_complaint_faq_no")
+        if selected_faq_no and selected_faq_no in set(list_df["faqNo"].astype(str)):
+            selected_row = list_df[list_df["faqNo"].astype(str) == selected_faq_no].iloc[0]
+        else:
+            selected_row = None
 
         st.divider()
-        st.subheader("민원 상세 내용")
 
-        detail_cols = st.columns(4)
-        detail_cols[0].metric("구분", safe_display_value(selected_row.get("source_type")))
-        detail_cols[1].metric("분야", safe_display_value(selected_row.get("category")))
-        detail_cols[2].metric("시도", safe_display_value(selected_row.get("sido")))
-        detail_cols[3].metric("시군구", safe_display_value(selected_row.get("sigungu")))
-
-        processed_full_name = safe_display_value(
-            selected_row.get("full_dept_name", ""),
-            default=combine_existing_dept_name(
-                selected_row.get("agency_name", ""),
-                selected_row.get("dept_name", "")
-            )
-        )
-
-        st.markdown("**처리 기관/부서**")
-        st.info(processed_full_name)
-
-        if safe_display_value(selected_row.get("dong", ""), default=""):
-            st.caption(f"행정동: {safe_display_value(selected_row.get('dong'))}")
-
-        st.markdown("**제목**")
-        st.write(safe_display_value(selected_row.get("title"), default="제목 없음"))
-
-        st.markdown("**민원 내용**")
-        question = safe_display_value(selected_row.get("question_text"), default="")
-        complaint_text = safe_display_value(selected_row.get("complaint_text"), default="")
-        st.write(question if question else complaint_text if complaint_text else "민원 내용이 없습니다.")
-
-        st.markdown("**답변 내용**")
-        answer = safe_display_value(selected_row.get("answer_text"), default="")
-        if answer:
-            st.write(answer)
+        if selected_row is None:
+            st.info("상세 조회할 민원을 표의 첫 번째 열에서 선택해 주세요.")
         else:
-            st.warning("신규 접수 민원이거나 답변 데이터가 없어 표시할 답변이 없습니다.")
+            st.subheader("민원 상세 내용")
 
-        if str(selected_row.get("faqNo", "")).startswith("USER_"):
-            st.caption("이 항목은 대시보드에서 신규 접수된 민원으로, 처리 완료 답변은 아직 등록되지 않은 상태입니다.")
+            detail_cols = st.columns(4)
+            detail_cols[0].metric("구분", safe_display_value(selected_row.get("source_type")))
+            detail_cols[1].metric("분야", safe_display_value(selected_row.get("category")))
+            detail_cols[2].metric("시도", safe_display_value(selected_row.get("sido")))
+            detail_cols[3].metric("시군구", safe_display_value(selected_row.get("sigungu")))
+
+            processed_full_name = safe_display_value(
+                selected_row.get("full_dept_name", ""),
+                default=combine_existing_dept_name(
+                    selected_row.get("agency_name", ""),
+                    selected_row.get("dept_name", "")
+                )
+            )
+
+            st.markdown("**처리 기관/부서**")
+            st.info(processed_full_name)
+
+            if safe_display_value(selected_row.get("dong", ""), default=""):
+                st.caption(f"행정동: {safe_display_value(selected_row.get('dong'))}")
+
+            st.markdown("**제목**")
+            st.write(safe_display_value(selected_row.get("title"), default="제목 없음"))
+
+            st.markdown("**민원 내용**")
+            question = safe_display_value(selected_row.get("question_text"), default="")
+            complaint_text = safe_display_value(selected_row.get("complaint_text"), default="")
+            st.write(question if question else complaint_text if complaint_text else "민원 내용이 없습니다.")
+
+            st.markdown("**답변 내용**")
+            answer = safe_display_value(selected_row.get("answer_text"), default="")
+            if answer:
+                st.write(answer)
+            else:
+                st.warning("신규 접수 민원이거나 답변 데이터가 없어 표시할 답변이 없습니다.")
