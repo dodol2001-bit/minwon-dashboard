@@ -799,7 +799,9 @@ def recommend_departments_from_data(df, user_location, selected_category, max_it
 
     base = df.copy()
     base = base[(base["agency_name"].str.len() > 0) & (base["dept_name"].str.len() > 0)]
-    base = base[~base["faqNo"].astype(str).str.startswith("USER_")]
+    # 신규 부서 추가로 저장된 USER_ 데이터도 이후 추천 후보로 사용할 수 있게 포함한다.
+    # 단, 대체 선택지인 대표연락처는 실제 부서 추천 후보에서 제외하고 아래에서 별도로 제공한다.
+    base = base[base["dept_name"].astype(str).str.strip() != "대표연락처"]
 
     if len(base) == 0:
         return [representative]
@@ -1206,7 +1208,7 @@ with tab1:
 
     st.subheader("담당부서 Top 10")
     dept_top = filtered.groupby("full_dept_name").size().reset_index(name="count").sort_values("count", ascending=False).head(10)
-    st.dataframe(dept_top.rename(columns={"full_dept_name": "기관/부서", "count": "건수"}), use_container_width=True)
+    st.dataframe(dept_top.rename(columns={"full_dept_name": "기관/부서", "count": "건수"}), use_container_width=True, hide_index=True)
 
     st.subheader("시군구·분야별 데이터")
     location_summary = (
@@ -1216,7 +1218,7 @@ with tab1:
         .sort_values("count", ascending=False)
         .head(30)
     )
-    st.dataframe(location_summary, use_container_width=True)
+    st.dataframe(location_summary, use_container_width=True, hide_index=True)
 
 
 # =========================================================
@@ -1251,7 +1253,7 @@ with tab2:
 
     with right:
         st.write("빈출 단어 순위")
-        st.dataframe(word_count_df, use_container_width=True)
+        st.dataframe(word_count_df, use_container_width=True, hide_index=True)
 
 
 # =========================================================
@@ -1278,6 +1280,10 @@ with tab3:
     )
 
     if st.button("분야 예측하기"):
+        # 다른 민원을 새로 예측할 때는 이전 전달 완료 알림을 초기화한다.
+        # 그래야 새 민원 분석 화면이 이전 성공 메시지 없이 초기 상태로 보인다.
+        st.session_state.pop("last_forward_message", None)
+
         if len(user_text.strip()) < 10:
             st.warning("민원 내용을 조금 더 길게 입력해 주세요.")
         else:
@@ -1298,27 +1304,6 @@ with tab3:
         user_location = st.session_state.get("user_location", "")
         top = result_df.iloc[0]
 
-        if top["category"] == "기타" and float(top["probability_percent"]) >= 99.99:
-            loc = parse_location(user_location)
-            fallback_region = " ".join([part for part in [loc.get("sido"), loc.get("sigungu")] if part and part not in {"기타 기관", "전체"}])
-            if fallback_region:
-                st.warning(f"분류 불가능한 민원입니다. {fallback_region} 민원총괄과에 연락 부탁드립니다.")
-            else:
-                st.warning("분류 불가능한 민원입니다. 해당 지역구 민원총괄과에 연락 부탁드립니다.")
-        else:
-            st.success(f"가장 가능성이 높은 분야: {top['category']} ({top['probability_percent']}%)")
-
-        st.dataframe(result_df[["category", "probability_percent"]], use_container_width=True)
-
-        st.plotly_chart(
-            draw_percent_bar_plotly(result_df.head(8), "category", "probability_percent", "신규 민원 분야 예측 확률", top_n=8),
-            use_container_width=True,
-        )
-
-        st.subheader("전달 분야 선택")
-
-        # 예측 결과에 나온 분야뿐 아니라 전체 분야를 모두 선택할 수 있게 구성한다.
-        # 단, 예측 결과에 없던 분야를 사용자가 직접 선택하면 추천 순위가 없으므로 보상 점수는 0점으로 저장한다.
         result_lookup = {
             str(row["category"]): {
                 "probability_percent": float(row["probability_percent"]),
@@ -1333,28 +1318,26 @@ with tab3:
             if str(category).strip()
         ])
 
-        # 예측 결과에 나온 분야를 먼저 보여주고, 나머지 분야는 뒤에 붙인다.
         predicted_categories = [str(category) for category in result_df["category"].tolist()]
         remaining_categories = [category for category in all_categories if category not in predicted_categories]
         selectable_categories = predicted_categories + remaining_categories
 
         category_labels = []
         category_label_map = {}
-
         for category in selectable_categories:
             if category in result_lookup:
-                prob = result_lookup[category]["probability_percent"]
                 rank = result_lookup[category]["rank"]
-                label = f"{rank}순위: {category} | {prob}%"
+                label = f"{rank}순위: {category}"
             else:
-                label = f"순위 없음: {category} | 예측 확률 없음"
-
+                label = f"순위 없음: {category}"
             category_labels.append(label)
             category_label_map[label] = category
 
+        st.subheader("추천 분야 및 전달 부서")
+
         selected_category_label = st.selectbox(
-            "전달할 민원 분야를 선택하세요",
-            category_labels
+            "추천 분야를 확인하고 전달할 분야를 선택하세요",
+            category_labels,
         )
 
         selected_category = category_label_map[selected_category_label]
@@ -1372,39 +1355,70 @@ with tab3:
             reward_message = "피드백 보상 점수: 없음 / 예측 순위 외 직접 선택"
             probability_message = "예측 확률 없음"
 
-        st.info(
-            f"선택한 전달 분야: {selected_category} ({probability_message})\n\n"
-            f"{reward_message}"
-        )
+        st.success(f"추천 분야: {selected_category}")
 
-        st.subheader("실제 데이터 기반 추천 전달 부서")
         loc = parse_location(user_location)
-        st.caption(
-            f"입력 지역 분석 결과: 시도={loc['sido']} / 시군구={loc['sigungu']}"
-        )
+        st.caption(f"입력 지역 분석 결과: 시도={loc['sido']} / 시군구={loc['sigungu']}")
 
         dept_candidates = recommend_departments_from_data(df, user_location, selected_category, max_items=10)
 
-        if not dept_candidates:
-            st.warning("입력 지역과 선택 분야에 맞는 실제 데이터 기반 부서를 찾지 못했습니다. 분야 전체 기준으로 다시 시도해 주세요.")
-        else:
-            dept_labels = []
-            for idx, item in enumerate(dept_candidates):
-                if item.get("is_representative_contact"):
-                    dept_labels.append(item["display_dept"])
-                else:
-                    dept_labels.append(f"{idx + 1}순위: {item['display_dept']}")
-            selected_label = st.selectbox("전달할 부서를 선택하세요", dept_labels)
-            selected_idx = dept_labels.index(selected_label)
-            selected_info = dept_candidates[selected_idx]
+        # 실제 후보 + 신규 부서 추가 + 대표 연락처 순서로 구성한다.
+        real_candidates = [item for item in dept_candidates if not item.get("is_representative_contact")]
+        representative_candidates = [item for item in dept_candidates if item.get("is_representative_contact")]
 
-            st.info(
-                f"추천 기관/부서: {selected_info['display_dept']}\n\n"
-                f"참고: 아래 이메일 주소는 가상의 이메일 주소입니다.\n\n"
-                f"{selected_info['email']}"
-            )
+        dept_labels = []
+        dept_label_map = {}
 
-            if st.button("해당 부서로 민원 전달하기"):
+        for idx, item in enumerate(real_candidates):
+            label = f"{idx + 1}순위: {item['display_dept']}"
+            dept_labels.append(label)
+            dept_label_map[label] = item
+
+        new_dept_label = "신규 부서 추가"
+        dept_labels.append(new_dept_label)
+        dept_label_map[new_dept_label] = {"is_new_department": True}
+
+        for item in representative_candidates:
+            label = item["display_dept"]
+            dept_labels.append(label)
+            dept_label_map[label] = item
+
+        selected_label = st.selectbox("전달할 부서를 선택하세요", dept_labels)
+        selected_info = dept_label_map[selected_label]
+
+        if selected_info.get("is_new_department"):
+            st.info("기존 데이터에서 적절한 부서가 없으면 신규 부서를 추가할 수 있습니다. 추가된 부서는 신규 민원 데이터에 저장되어 이후 같은 지역·분야의 부서 추천 후보로 활용됩니다.")
+
+            if loc["sido"] != "기타 기관" and loc["sigungu"] != "전체":
+                default_agency = f"{loc['sido']} {loc['sigungu']}청"
+            elif loc["sido"] != "기타 기관":
+                default_agency = f"{loc['sido']}청"
+            else:
+                default_agency = "기타 기관"
+
+            new_agency = st.text_input("신규 기관명", value=default_agency)
+            new_dept = st.text_input("신규 부서명", placeholder="예: 자원순환과, 교통행정과, 아동청소년과")
+
+            new_full_dept = combine_existing_dept_name(new_agency, new_dept) if new_dept.strip() else new_agency
+            selected_info = {
+                "agency": new_agency.strip(),
+                "dept": new_dept.strip(),
+                "full_dept": new_full_dept,
+                "display_dept": new_full_dept,
+                "email": make_fake_email(new_full_dept),
+                "is_new_department": True,
+            }
+
+        st.info(
+            f"추천 기관/부서: {selected_info['display_dept']}\n\n"
+            f"참고: 아래 이메일 주소는 가상의 이메일 주소입니다.\n\n"
+            f"{selected_info['email']}"
+        )
+
+        if st.button("해당 부서로 민원 전달하기"):
+            if selected_info.get("is_new_department") and not str(selected_info.get("dept", "")).strip():
+                st.warning("신규 부서를 추가하려면 신규 부서명을 입력해 주세요.")
+            else:
                 saved = save_new_complaint(
                     user_text=user_text,
                     user_location=user_location,
@@ -1438,11 +1452,12 @@ with tab3:
                 build_category_keyword_weights.clear()
                 build_feedback_keyword_weights.clear()
                 feedback_reward_label = "없음" if float(feedback.get("reward_score", 0.0)) <= 0 else f"{feedback['reward_score']}점"
+                added_dept_message = " / 신규 부서가 추천 후보 데이터에 추가됨" if selected_info.get("is_new_department") else ""
                 st.session_state["last_forward_message"] = (
                     f"{selected_info['display_dept']}로 민원이 전달되었습니다! "
                     f"현재 신규 접수 누적 수가 1건 증가했습니다. "
                     f"저장 분야: {saved['category']} / 지역: {saved['user_sido']} {saved['user_sigungu']} "
-                    f"/ 피드백 보상: {feedback_reward_label}"
+                    f"/ 피드백 보상: {feedback_reward_label}{added_dept_message}"
                 )
                 st.rerun()
 
@@ -1451,7 +1466,31 @@ with tab3:
             st.caption("참고: 표시된 이메일 주소는 실제 발송용 주소가 아니라 시연을 위한 가상의 이메일 주소입니다.")
             st.balloons()
 
-        st.caption("분야 예측은 API 데이터에서 추출한 토큰 가중치를 우선 반영하며, 사용자가 선택한 분야/부서는 보상 피드백으로 저장되어 이후 예측 가중치에 보조 반영됩니다. 기타는 다른 분야 관련 단어가 없을 때만 추천됩니다. 부서 추천은 실제 기존 데이터에 존재하는 기관/부서만 사용합니다.")
+        st.divider()
+        st.subheader("분석 지표")
+
+        if top["category"] == "기타" and float(top["probability_percent"]) >= 99.99:
+            fallback_region = " ".join([part for part in [loc.get("sido"), loc.get("sigungu")] if part and part not in {"기타 기관", "전체"}])
+            if fallback_region:
+                st.warning(f"분류 불가능한 민원입니다. {fallback_region} 민원총괄과에 연락 부탁드립니다.")
+            else:
+                st.warning("분류 불가능한 민원입니다. 해당 지역구 민원총괄과에 연락 부탁드립니다.")
+        else:
+            st.success(f"가장 가능성이 높은 분야: {top['category']} ({top['probability_percent']}%)")
+
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("선택 분야", selected_category)
+        metric_cols[1].metric("선택 분야 예측 확률", probability_message)
+        metric_cols[2].metric("피드백 보상", "없음" if reward_score <= 0 else f"{reward_score}점")
+
+        st.dataframe(result_df[["category", "probability_percent"]], use_container_width=True, hide_index=True)
+
+        st.plotly_chart(
+            draw_percent_bar_plotly(result_df.head(8), "category", "probability_percent", "신규 민원 분야 예측 확률", top_n=8),
+            use_container_width=True,
+        )
+
+        st.caption("분야 예측은 API 데이터에서 추출한 토큰 가중치를 우선 반영하며, 사용자가 선택한 분야/부서는 보상 피드백으로 저장되어 이후 예측 가중치에 보조 반영됩니다. 기타는 다른 분야 관련 단어가 없을 때만 추천됩니다. 부서 추천은 실제 기존 데이터와 사용자가 추가한 신규 부서 데이터를 함께 활용합니다.")
 
 
 # =========================================================
@@ -1509,7 +1548,7 @@ with tab4:
 
         st.subheader("지역별 비율 표")
         table_df = sido_summary[["sido", "count", "percent"]].rename(columns={"sido": "지역", "count": "건수", "percent": "비율(%)"})
-        st.dataframe(table_df, use_container_width=True)
+        st.dataframe(table_df, use_container_width=True, hide_index=True)
 
         percent_chart_df = table_df.rename(columns={"지역": "region", "비율(%)": "percent"})
         st.plotly_chart(
