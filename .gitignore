@@ -7,3 +7,5 @@ data/raw/
 data/backup/
 
 *.crc
+output/tables/new_complaints.csv
+output/tables/reinforcement_feedback.csv
